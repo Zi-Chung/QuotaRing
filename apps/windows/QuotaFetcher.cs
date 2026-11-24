@@ -16,7 +16,8 @@ public sealed record ModelBucketInfo(
     string DisplayName,
     string Window,
     int Percent,
-    DateTimeOffset? ResetTime
+    DateTimeOffset? ResetTime,
+    double WindowSeconds = 7 * 24 * 3600
 );
 
 public sealed record ModelGroupInfo(
@@ -34,6 +35,7 @@ public sealed record ProviderQuota(
     DateTimeOffset? SyncedAt,
     QuotaWindow? FiveHour,
     QuotaWindow? Weekly,
+    QuotaWindow? Monthly,
     List<ModelGroupInfo> Groups
 );
 
@@ -154,12 +156,14 @@ public sealed class QuotaFetcher
                 int pct = (int)Math.Round(frac * 100.0);
                 DateTimeOffset? reset = ParseIso(GetStringOrNull(b, "resetTime"));
                 string lower = id.ToLowerInvariant();
+                bool isMonthly = lower.Contains("monthly");
                 bool isWeekly = lower.Contains("weekly");
                 bool is5h = lower.Contains("5h");
-                string win = isWeekly ? "weekly" : (is5h ? "5h" : "other");
-                string label = isWeekly ? "周额度" : (is5h ? "5 小时额度" : id);
+                string win = isMonthly ? "monthly" : (isWeekly ? "weekly" : (is5h ? "5h" : "other"));
+                string label = isMonthly ? "月额度" : (isWeekly ? "周额度" : (is5h ? "5 小时额度" : id));
+                double winSecs = isMonthly ? (30 * 24 * 3600) : (isWeekly ? (7 * 24 * 3600) : (5 * 3600));
 
-                var info = new ModelBucketInfo(id, label, win, pct, reset);
+                var info = new ModelBucketInfo(id, label, win, pct, reset, winSecs);
                 if (lower.StartsWith("gemini"))
                 {
                     geminiBuckets.Add(info);
@@ -197,6 +201,7 @@ public sealed class QuotaFetcher
                 ParseIso(GetStringOrNull(root, "updatedAt")),
                 fiveHour,
                 weekly,
+                null,
                 groups
             );
         }
@@ -253,6 +258,7 @@ public sealed class QuotaFetcher
 
                 QuotaWindow? fiveHour = null;
                 QuotaWindow? weekly = null;
+                QuotaWindow? monthly = null;
                 var buckets = new List<ModelBucketInfo>();
 
                 foreach (var w in rawWindows)
@@ -269,15 +275,22 @@ public sealed class QuotaFetcher
                     {
                         int hrs = (int)Math.Round(winMins / 60.0);
                         string label = $"{hrs} 小时额度";
-                        fiveHour = new QuotaWindow(label, hrs.ToString(CultureInfo.InvariantCulture), remPct, resetTime, winMins * 60.0);
-                        buckets.Add(new ModelBucketInfo("codex-5h", label, "5h", remPct, resetTime));
+                        double secs = winMins * 60.0;
+                        fiveHour = new QuotaWindow(label, hrs.ToString(CultureInfo.InvariantCulture), remPct, resetTime, secs);
+                        buckets.Add(new ModelBucketInfo("codex-5h", label, "5h", remPct, resetTime, secs));
+                    }
+                    else if (winMins >= 20000)
+                    {
+                        double secs = winMins * 60.0;
+                        monthly = new QuotaWindow("月额度", "M", remPct, resetTime, secs);
+                        buckets.Add(new ModelBucketInfo("codex-monthly", "月额度", "monthly", remPct, resetTime, secs));
                     }
                     else
                     {
                         double secs = winMins > 0 ? winMins * 60.0 : 7 * 24 * 3600;
                         string label = (winMins == 10080 || winMins == 0) ? "周额度" : $"{(int)Math.Round(winMins / 1440.0)} 天额度";
                         weekly = new QuotaWindow(label, "W", remPct, resetTime, secs);
-                        buckets.Add(new ModelBucketInfo("codex-weekly", label, "weekly", remPct, resetTime));
+                        buckets.Add(new ModelBucketInfo("codex-weekly", label, "weekly", remPct, resetTime, secs));
                     }
                 }
 
@@ -292,6 +305,7 @@ public sealed class QuotaFetcher
                     _ => planRaw
                 };
 
+                static int CodexRank(string w) => w == "5h" ? 0 : (w == "weekly" ? 1 : 2);
                 return new ProviderQuota(
                     "codex",
                     "Codex",
@@ -301,9 +315,10 @@ public sealed class QuotaFetcher
                     synced,
                     fiveHour,
                     weekly,
+                    monthly,
                     new List<ModelGroupInfo>
                     {
-                        new("OpenAI Codex", "来自本地会话日志 rate_limits", buckets.OrderBy(x => x.Window == "5h" ? 0 : 1).ToList())
+                        new("OpenAI Codex", "来自本地会话日志 rate_limits", buckets.OrderBy(x => CodexRank(x.Window)).ToList())
                     }
                 );
             }
@@ -349,7 +364,8 @@ public sealed class QuotaFetcher
                     if (pct.HasValue)
                     {
                         double mins = GetDoubleOrNull(fhEl, "windowMinutes") ?? 300.0;
-                        fiveHour = new QuotaWindow(GetStringOrNull(fhEl, "label") ?? "5 小时额度", "5", pct.Value, ResolveReset(fhEl), mins * 60.0);
+                        string tag = GetStringOrNull(fhEl, "shortTag") ?? "5";
+                        fiveHour = new QuotaWindow(GetStringOrNull(fhEl, "label") ?? "5 小时额度", tag, pct.Value, ResolveReset(fhEl), mins * 60.0);
                     }
                 }
 
@@ -360,7 +376,20 @@ public sealed class QuotaFetcher
                     if (pct.HasValue)
                     {
                         double mins = GetDoubleOrNull(wkEl, "windowMinutes") ?? 10080.0;
-                        weekly = new QuotaWindow(GetStringOrNull(wkEl, "label") ?? "周额度", "W", pct.Value, ResolveReset(wkEl), mins * 60.0);
+                        string tag = GetStringOrNull(wkEl, "shortTag") ?? "W";
+                        weekly = new QuotaWindow(GetStringOrNull(wkEl, "label") ?? "周额度", tag, pct.Value, ResolveReset(wkEl), mins * 60.0);
+                    }
+                }
+
+                QuotaWindow? monthly = null;
+                if (root.TryGetProperty("monthly", out var moEl) && moEl.ValueKind == JsonValueKind.Object)
+                {
+                    int? pct = ResolvePercent(moEl);
+                    if (pct.HasValue)
+                    {
+                        double mins = GetDoubleOrNull(moEl, "windowMinutes") ?? 43200.0;
+                        string tag = GetStringOrNull(moEl, "shortTag") ?? "M";
+                        monthly = new QuotaWindow(GetStringOrNull(moEl, "label") ?? "月额度", tag, pct.Value, ResolveReset(moEl), mins * 60.0);
                     }
                 }
 
@@ -378,12 +407,16 @@ public sealed class QuotaFetcher
                             {
                                 int? pct = ResolvePercent(b);
                                 if (!pct.HasValue) continue;
+                                string win = GetStringOrNull(b, "window") ?? "other";
+                                double defaultSecs = win == "5h" ? (5 * 3600) : (win == "monthly" ? (30 * 24 * 3600) : (7 * 24 * 3600));
+                                double winSecs = GetDoubleOrNull(b, "windowMinutes") is double wm ? wm * 60.0 : defaultSecs;
                                 bs.Add(new ModelBucketInfo(
                                     GetStringOrNull(b, "id") ?? Guid.NewGuid().ToString("N"),
                                     GetStringOrNull(b, "displayName") ?? "额度",
-                                    GetStringOrNull(b, "window") ?? "other",
+                                    win,
                                     pct.Value,
-                                    ResolveReset(b)
+                                    ResolveReset(b),
+                                    winSecs
                                 ));
                             }
                         }
@@ -395,14 +428,16 @@ public sealed class QuotaFetcher
                 {
                     var autoBuckets = new List<ModelBucketInfo>();
                     if (fiveHour is not null)
-                        autoBuckets.Add(new ModelBucketInfo($"{id}-5h", fiveHour.Label, "5h", fiveHour.Percent, fiveHour.ResetTime));
+                        autoBuckets.Add(new ModelBucketInfo($"{id}-5h", fiveHour.Label, "5h", fiveHour.Percent, fiveHour.ResetTime, fiveHour.WindowSeconds));
                     if (weekly is not null)
-                        autoBuckets.Add(new ModelBucketInfo($"{id}-weekly", weekly.Label, "weekly", weekly.Percent, weekly.ResetTime));
+                        autoBuckets.Add(new ModelBucketInfo($"{id}-weekly", weekly.Label, "weekly", weekly.Percent, weekly.ResetTime, weekly.WindowSeconds));
+                    if (monthly is not null)
+                        autoBuckets.Add(new ModelBucketInfo($"{id}-monthly", monthly.Label, "monthly", monthly.Percent, monthly.ResetTime, monthly.WindowSeconds));
                     if (autoBuckets.Count > 0)
                         groups.Add(new ModelGroupInfo(name, $"来自开放插槽 {Path.GetFileName(path)}", autoBuckets));
                 }
 
-                if (fiveHour is null && weekly is null && groups.Count == 0) continue;
+                if (fiveHour is null && weekly is null && monthly is null && groups.Count == 0) continue;
 
                 list.Add(new ProviderQuota(
                     id,
@@ -413,6 +448,7 @@ public sealed class QuotaFetcher
                     synced,
                     fiveHour,
                     weekly,
+                    monthly,
                     groups
                 ));
             }

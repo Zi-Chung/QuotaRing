@@ -16,7 +16,7 @@
 - **同心双环极简视觉**：
   - **外圈** —— 剩余可用额度（`0%–100%`）
   - **内圈** —— 距离重置的剩余倒计时
-  - **`5` 与 `W` 并排双环**：macOS 菜单栏默认紧凑展示 `5 [◎]  W [◎]`，Windows 右下角托盘展示高清自适应同心双环。
+  - **`5` / `W` / `M` 自适应双环**：自动按平台实际周期展示 5 小时（`5`）、周（`W`）、月（`M`）或自定义周期双环；macOS 菜单栏默认紧凑横排，Windows 右下角托盘展示高清自适应同心双环。
 - **多品牌统一查看**：
   - **Antigravity**：通过官方 `agy` CLI `statusLine` 钩子同步快照（内置跨平台 Antigravity 侧边栏插件）。
   - **OpenAI Codex**：纯本地自动解析 `~/.codex/sessions/**/*.jsonl` 中的最新 `rate_limits`。
@@ -95,11 +95,11 @@ QuotaRing 会自动监听 `~/.config/quota-bar/providers/*.json`（Windows 路�
   "shortBadge": "Cu",
   "planTier": "Pro",
   "updatedAt": "2026-11-24T10:40:00Z",
-  "weekly": {
-    "label": "周额度",
+  "monthly": {
+    "label": "月额度",
     "remainingPercent": 80,
-    "resetTime": "2026-12-01T10:40:00Z",
-    "windowMinutes": 10080
+    "resetTime": "2026-12-24T10:40:00Z",
+    "windowMinutes": 43200
   }
 }
 ```

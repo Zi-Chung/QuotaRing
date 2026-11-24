@@ -16,7 +16,7 @@ Most AI quota monitors extract OAuth tokens, decrypt browser cookies via OS Keyc
 - **Concentric Dual-Ring Design**:
   - **Outer Ring** — Remaining quota (`0%–100%`)
   - **Inner Ring** — Time remaining until quota reset
-  - **`5` & `W` Pair** — Ultra-compact `5 [◎]  W [◎]` display in the macOS menu bar, or crisp high-DPI dual-ring in the Windows system tray.
+  - **`5` / `W` / `M` Rings** — Ultra-compact `5 [◎]  W [◎]` or `M [◎]` (5-hour, weekly, monthly, or custom cycles) in the macOS menu bar, or crisp high-DPI dual-ring in the Windows system tray.
 - **Multi-Provider Support**:
   - **Antigravity**: Synced via the official `agy` CLI `statusLine` hook (bundled cross-platform MCP App plugin included).
   - **OpenAI Codex**: Automatically reads local session logs under `~/.codex/sessions/**/*.jsonl` (`rate_limits`).
@@ -97,17 +97,11 @@ Any external script, enterprise Admin API integration, or manual tracker can wri
   "shortBadge": "Cu",
   "planTier": "Pro",
   "updatedAt": "2026-11-24T10:40:00Z",
-  "fiveHour": {
-    "label": "5h Window",
+  "monthly": {
+    "label": "Monthly",
     "remainingPercent": 80,
-    "resetTime": "2026-11-24T15:40:00Z",
-    "windowMinutes": 300
-  },
-  "weekly": {
-    "label": "Weekly",
-    "remainingPercent": 65,
-    "resetTime": "2026-12-01T10:40:00Z",
-    "windowMinutes": 10080
+    "resetTime": "2026-12-24T10:40:00Z",
+    "windowMinutes": 43200
   }
 }
 ```

@@ -253,8 +253,18 @@ struct PopoverView: View {
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 
+    private func defaultWindowSeconds(for window: String) -> TimeInterval {
+        switch window {
+        case "5h": return 5.0 * 3600.0
+        case "monthly": return 30.0 * 24.0 * 3600.0
+        default: return 7.0 * 24.0 * 3600.0
+        }
+    }
+
     private func bucketRow(_ bucket: ModelBucketInfo, now: Date) -> some View {
-        let winSecs: TimeInterval = (bucket.window == "5h") ? (5 * 3600) : (7 * 24 * 3600)
+        let winSecs: TimeInterval = bucket.windowSeconds > 0
+            ? bucket.windowSeconds
+            : defaultWindowSeconds(for: bucket.window)
         let outerFrac = Double(bucket.percent) / 100.0
         let innerFrac = liveRemainingFraction(resetIso: bucket.resetTime, windowSeconds: winSecs, now: now)
         let cd = liveCountdownText(resetIso: bucket.resetTime, now: now)
@@ -387,11 +397,12 @@ struct PopoverView: View {
                     get: { vm.displayFormat },
                     set: { vm.onFormatChanged?($0) }
                 )) {
-                    Text("5 + W 双环 [推荐]").tag(DisplayFormat.dualRingPair)
-                    Text("仅 5 小时双环").tag(DisplayFormat.dualRingFiveHour)
-                    Text("仅周额度双环").tag(DisplayFormat.dualRingWeekly)
-                    Text("双环 + 周百分比").tag(DisplayFormat.ringWithWeeklyPct)
-                    Text("双环 + 5h | 周").tag(DisplayFormat.ringWithBothPct)
+                    Text("5 / W / M 双环 [推荐]").tag(DisplayFormat.dualRingPair)
+                    Text("仅 5 小时双环 (5)").tag(DisplayFormat.dualRingFiveHour)
+                    Text("仅周额度双环 (W)").tag(DisplayFormat.dualRingWeekly)
+                    Text("仅月额度双环 (M)").tag(DisplayFormat.dualRingMonthly)
+                    Text("双环 + 主百分比").tag(DisplayFormat.ringWithWeeklyPct)
+                    Text("双环 + 全部百分比").tag(DisplayFormat.ringWithBothPct)
                     Text("双环 + 文字").tag(DisplayFormat.fullText)
                 }
                 .labelsHidden()

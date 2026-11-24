@@ -137,9 +137,12 @@ public sealed class TrayApplicationContext : ApplicationContext
     private void UpdateTrayVisual(MultiQuotaSnapshot snapshot)
     {
         var active = ResolveActiveProvider(snapshot.Providers);
-        QuotaWindow? targetWindow = _prefs.SelectedWindow == "weekly"
-            ? (active?.Weekly ?? active?.FiveHour)
-            : (active?.FiveHour ?? active?.Weekly);
+        QuotaWindow? targetWindow = _prefs.SelectedWindow switch
+        {
+            "monthly" => active?.Monthly ?? active?.Weekly ?? active?.FiveHour,
+            "weekly" => active?.Weekly ?? active?.Monthly ?? active?.FiveHour,
+            _ => active?.FiveHour ?? active?.Weekly ?? active?.Monthly
+        };
 
         double outer = targetWindow is not null ? targetWindow.Percent / 100.0 : 0.0;
         double inner = RemainingTimeFraction(targetWindow);
@@ -161,6 +164,7 @@ public sealed class TrayApplicationContext : ApplicationContext
             var parts = new List<string>();
             if (active.FiveHour is not null) parts.Add($"5h:{active.FiveHour.Percent}%");
             if (active.Weekly is not null) parts.Add($"W:{active.Weekly.Percent}%");
+            if (active.Monthly is not null) parts.Add($"M:{active.Monthly.Percent}%");
             tip = $"{active.Name} " + string.Join(" ", parts);
         }
         _notifyIcon.Text = tip.Length > 63 ? tip[..63] : tip;
@@ -243,8 +247,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         w5.Click += (_, _) => { _prefs.SelectedWindow = "5h"; SavePrefs(); RefreshData(); };
         var ww = new ToolStripMenuItem("周额度 (W)") { Checked = _prefs.SelectedWindow == "weekly" };
         ww.Click += (_, _) => { _prefs.SelectedWindow = "weekly"; SavePrefs(); RefreshData(); };
+        var wm = new ToolStripMenuItem("月额度 (M)") { Checked = _prefs.SelectedWindow == "monthly" };
+        wm.Click += (_, _) => { _prefs.SelectedWindow = "monthly"; SavePrefs(); RefreshData(); };
         windowMenu.DropDownItems.Add(w5);
         windowMenu.DropDownItems.Add(ww);
+        windowMenu.DropDownItems.Add(wm);
         menu.Items.Add(windowMenu);
 
         // Interval selector

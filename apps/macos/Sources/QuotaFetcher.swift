@@ -17,6 +17,7 @@ struct ModelBucketInfo {
     let percent: Int
     let resetTime: String
     let description: String
+    let windowSeconds: TimeInterval
 }
 
 struct ModelGroupInfo {
@@ -35,6 +36,7 @@ struct ProviderQuota {
     var syncedAt: Date?
     var fiveHour: QuotaWindow?
     var weekly: QuotaWindow?
+    var monthly: QuotaWindow?
     var groups: [ModelGroupInfo]
 }
 
@@ -73,6 +75,7 @@ private struct AgySnapshotFile: Decodable {
 
 private struct SlotWindowInput: Decodable {
     let label: String?
+    let shortTag: String?
     let remainingPercent: Double?
     let usedPercent: Double?
     let remainingFraction: Double?
@@ -90,6 +93,7 @@ private struct SlotBucketInput: Decodable {
     let remainingFraction: Double?
     let resetTime: String?
     let resetsAt: Double?
+    let windowMinutes: Double?
     let description: String?
 }
 
@@ -108,6 +112,7 @@ private struct SlotProviderFile: Decodable {
     let updatedAt: String?
     let fiveHour: SlotWindowInput?
     let weekly: SlotWindowInput?
+    let monthly: SlotWindowInput?
     let groups: [SlotGroupInput]?
 }
 
@@ -222,10 +227,12 @@ class QuotaFetcher {
             let percent = Int(round(fraction * 100.0))
             let reset = b.resetTime ?? ""
             let lowerId = b.id.lowercased()
+            let isMonthly = lowerId.contains("monthly")
             let isWeekly = lowerId.contains("weekly")
             let is5h = lowerId.contains("5h")
-            let window = isWeekly ? "weekly" : (is5h ? "5h" : "other")
-            let label = isWeekly ? "周额度" : (is5h ? "5 小时额度" : b.id)
+            let window = isMonthly ? "monthly" : (isWeekly ? "weekly" : (is5h ? "5h" : "other"))
+            let label = isMonthly ? "月额度" : (isWeekly ? "周额度" : (is5h ? "5 小时额度" : b.id))
+            let winSecs: TimeInterval = isMonthly ? (30 * 24 * 3600) : (isWeekly ? (7 * 24 * 3600) : (5 * 3600))
 
             let info = ModelBucketInfo(
                 id: b.id,
@@ -233,7 +240,8 @@ class QuotaFetcher {
                 window: window,
                 percent: percent,
                 resetTime: reset,
-                description: b.id
+                description: b.id,
+                windowSeconds: winSecs
             )
 
             if lowerId.hasPrefix("gemini") {
@@ -277,6 +285,7 @@ class QuotaFetcher {
             syncedAt: parseISO8601(snap.updatedAt),
             fiveHour: fiveHour,
             weekly: weekly,
+            monthly: nil,
             groups: groups
         )
     }
@@ -338,6 +347,7 @@ class QuotaFetcher {
 
             var fiveHour: QuotaWindow?
             var weekly: QuotaWindow?
+            var monthly: QuotaWindow?
             var buckets: [ModelBucketInfo] = []
 
             for w in [primary, secondary].compactMap({ $0 }) {
@@ -352,12 +362,17 @@ class QuotaFetcher {
                     let hours = Int(round(windowMinutes / 60.0))
                     let label = "\(hours) 小时额度"
                     fiveHour = QuotaWindow(label: label, shortTag: "\(hours)", percent: remainingPct, resetTime: resetIso, windowSeconds: secs)
-                    buckets.append(ModelBucketInfo(id: "codex-5h", displayName: label, window: "5h", percent: remainingPct, resetTime: resetIso, description: ""))
+                    buckets.append(ModelBucketInfo(id: "codex-5h", displayName: label, window: "5h", percent: remainingPct, resetTime: resetIso, description: "", windowSeconds: secs))
+                } else if windowMinutes >= 20000 {
+                    let secs = windowMinutes * 60.0
+                    let label = "月额度"
+                    monthly = QuotaWindow(label: label, shortTag: "M", percent: remainingPct, resetTime: resetIso, windowSeconds: secs)
+                    buckets.append(ModelBucketInfo(id: "codex-monthly", displayName: label, window: "monthly", percent: remainingPct, resetTime: resetIso, description: "", windowSeconds: secs))
                 } else {
                     let secs = windowMinutes > 0 ? windowMinutes * 60.0 : 7 * 24 * 3600
                     let label = windowMinutes == 10080 || windowMinutes == 0 ? "周额度" : "\(Int(round(windowMinutes / 1440.0))) 天额度"
                     weekly = QuotaWindow(label: label, shortTag: "W", percent: remainingPct, resetTime: resetIso, windowSeconds: secs)
-                    buckets.append(ModelBucketInfo(id: "codex-weekly", displayName: label, window: "weekly", percent: remainingPct, resetTime: resetIso, description: ""))
+                    buckets.append(ModelBucketInfo(id: "codex-weekly", displayName: label, window: "weekly", percent: remainingPct, resetTime: resetIso, description: "", windowSeconds: secs))
                 }
             }
 
@@ -373,6 +388,7 @@ class QuotaFetcher {
                 }
             }
 
+            let rank: (String) -> Int = { $0 == "5h" ? 0 : ($0 == "weekly" ? 1 : 2) }
             return ProviderQuota(
                 id: "codex",
                 name: "Codex",
@@ -383,11 +399,12 @@ class QuotaFetcher {
                 syncedAt: eventTime,
                 fiveHour: fiveHour,
                 weekly: weekly,
+                monthly: monthly,
                 groups: [
                     ModelGroupInfo(
                         displayName: "OpenAI Codex",
                         description: "来自本地会话日志 rate_limits",
-                        buckets: buckets.sorted { ($0.window == "5h" ? 0 : 1) < ($1.window == "5h" ? 0 : 1) }
+                        buckets: buckets.sorted { rank($0.window) < rank($1.window) }
                     )
                 ]
             )
@@ -429,7 +446,7 @@ class QuotaFetcher {
                 let mins = fh.windowMinutes ?? 300.0
                 fiveHour = QuotaWindow(
                     label: fh.label ?? "5 小时额度",
-                    shortTag: "5",
+                    shortTag: (fh.shortTag?.isEmpty == false ? fh.shortTag! : "5"),
                     percent: pct,
                     resetTime: resolveResetISO(resetTime: fh.resetTime, resetsAt: fh.resetsAt),
                     windowSeconds: mins * 60.0
@@ -442,9 +459,22 @@ class QuotaFetcher {
                 let mins = wk.windowMinutes ?? 10080.0
                 weekly = QuotaWindow(
                     label: wk.label ?? "周额度",
-                    shortTag: "W",
+                    shortTag: (wk.shortTag?.isEmpty == false ? wk.shortTag! : "W"),
                     percent: pct,
                     resetTime: resolveResetISO(resetTime: wk.resetTime, resetsAt: wk.resetsAt),
+                    windowSeconds: mins * 60.0
+                )
+            }
+
+            var monthly: QuotaWindow?
+            if let mo = slot.monthly,
+               let pct = resolvePercent(remainingPercent: mo.remainingPercent, usedPercent: mo.usedPercent, remainingFraction: mo.remainingFraction) {
+                let mins = mo.windowMinutes ?? 43200.0
+                monthly = QuotaWindow(
+                    label: mo.label ?? "月额度",
+                    shortTag: (mo.shortTag?.isEmpty == false ? mo.shortTag! : "M"),
+                    percent: pct,
+                    resetTime: resolveResetISO(resetTime: mo.resetTime, resetsAt: mo.resetsAt),
                     windowSeconds: mins * 60.0
                 )
             }
@@ -456,13 +486,17 @@ class QuotaFetcher {
                         guard let pct = resolvePercent(remainingPercent: b.remainingPercent, usedPercent: b.usedPercent, remainingFraction: b.remainingFraction) else {
                             return nil
                         }
+                        let win = b.window ?? "other"
+                        let defaultSecs: TimeInterval = (win == "5h") ? (5 * 3600) : (win == "monthly" ? (30 * 24 * 3600) : (7 * 24 * 3600))
+                        let winSecs: TimeInterval = b.windowMinutes.map { $0 * 60.0 } ?? defaultSecs
                         return ModelBucketInfo(
                             id: b.id ?? UUID().uuidString,
                             displayName: b.displayName ?? "额度",
-                            window: b.window ?? "other",
+                            window: win,
                             percent: pct,
                             resetTime: resolveResetISO(resetTime: b.resetTime, resetsAt: b.resetsAt),
-                            description: b.description ?? ""
+                            description: b.description ?? "",
+                            windowSeconds: winSecs
                         )
                     }
                     if !bs.isEmpty {
@@ -472,17 +506,20 @@ class QuotaFetcher {
             } else {
                 var autoBuckets: [ModelBucketInfo] = []
                 if let fh = fiveHour {
-                    autoBuckets.append(ModelBucketInfo(id: "\(id)-5h", displayName: fh.label, window: "5h", percent: fh.percent, resetTime: fh.resetTime, description: ""))
+                    autoBuckets.append(ModelBucketInfo(id: "\(id)-5h", displayName: fh.label, window: "5h", percent: fh.percent, resetTime: fh.resetTime, description: "", windowSeconds: fh.windowSeconds))
                 }
                 if let wk = weekly {
-                    autoBuckets.append(ModelBucketInfo(id: "\(id)-weekly", displayName: wk.label, window: "weekly", percent: wk.percent, resetTime: wk.resetTime, description: ""))
+                    autoBuckets.append(ModelBucketInfo(id: "\(id)-weekly", displayName: wk.label, window: "weekly", percent: wk.percent, resetTime: wk.resetTime, description: "", windowSeconds: wk.windowSeconds))
+                }
+                if let mo = monthly {
+                    autoBuckets.append(ModelBucketInfo(id: "\(id)-monthly", displayName: mo.label, window: "monthly", percent: mo.percent, resetTime: mo.resetTime, description: "", windowSeconds: mo.windowSeconds))
                 }
                 if !autoBuckets.isEmpty {
                     groups.append(ModelGroupInfo(displayName: name, description: "来自开放插槽 \(fileURL.lastPathComponent)", buckets: autoBuckets))
                 }
             }
 
-            guard fiveHour != nil || weekly != nil || !groups.isEmpty else { continue }
+            guard fiveHour != nil || weekly != nil || monthly != nil || !groups.isEmpty else { continue }
 
             let symbol: String
             switch id {
@@ -502,6 +539,7 @@ class QuotaFetcher {
                 syncedAt: syncedAt,
                 fiveHour: fiveHour,
                 weekly: weekly,
+                monthly: monthly,
                 groups: groups
             ))
         }

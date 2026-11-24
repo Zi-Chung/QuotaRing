@@ -28,6 +28,7 @@
     },
     "fiveHour": { "$ref": "#/$defs/window" },
     "weekly": { "$ref": "#/$defs/window" },
+    "monthly": { "$ref": "#/$defs/window" },
     "groups": {
       "type": "array",
       "items": {
@@ -49,6 +50,7 @@
       "type": "object",
       "properties": {
         "label": { "type": "string" },
+        "shortTag": { "type": "string", "maxLength": 2, "description": "Optional short tag next to the ring (defaults to 5, W, or M)." },
         "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "remainingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
@@ -62,12 +64,13 @@
       "properties": {
         "id": { "type": "string" },
         "displayName": { "type": "string" },
-        "window": { "type": "string", "enum": ["5h", "weekly", "other"] },
+        "window": { "type": "string", "enum": ["5h", "weekly", "monthly", "other"] },
         "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "remainingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
         "resetTime": { "type": "string", "format": "date-time" },
         "resetsAt": { "type": "number" },
+        "windowMinutes": { "type": "number", "minimum": 1 },
         "description": { "type": "string" }
       }
     }

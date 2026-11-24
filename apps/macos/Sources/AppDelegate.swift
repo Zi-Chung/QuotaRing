@@ -2,12 +2,13 @@ import Cocoa
 import SwiftUI
 
 enum DisplayFormat: Int {
-    case dualRingPair = 0        // 5 [◎]  W [◎]
+    case dualRingPair = 0        // 5 [◎]  W [◎]  M [◎]（按实际周期自动组合）
     case dualRingFiveHour = 1    // 5 [◎]
     case dualRingWeekly = 2      // W [◎]
     case ringWithWeeklyPct = 3   // [◎] 97%
     case ringWithBothPct = 4     // [◎] 93% | 97%
-    case fullText = 5            // [◎] 5h 93% · 周 97%
+    case fullText = 5            // [◎] 5h 93% · 周 97% · 月 80%
+    case dualRingMonthly = 6     // M [◎]
 }
 
 // MARK: - Shared Time Helpers
@@ -350,6 +351,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 var items: [RingSlotItem] = []
                 if let fh = p.fiveHour { items.append(ringItem(for: fh, showLabel: true)) }
                 if let wk = p.weekly { items.append(ringItem(for: wk, showLabel: true)) }
+                if let mo = p.monthly { items.append(ringItem(for: mo, showLabel: true)) }
                 if !items.isEmpty {
                     groups.append((prefix: providers.count > 1 ? p.shortBadge : nil, items: items))
                 }
@@ -365,53 +367,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             var groups: [(prefix: String?, items: [RingSlotItem])] = []
             var title = ""
 
+            let fallbackPrimary = provider.weekly ?? provider.monthly ?? provider.fiveHour
             switch viewModel.displayFormat {
             case .dualRingPair:
                 var items: [RingSlotItem] = []
                 if let fh = provider.fiveHour { items.append(ringItem(for: fh, showLabel: true)) }
                 if let wk = provider.weekly { items.append(ringItem(for: wk, showLabel: true)) }
+                if let mo = provider.monthly { items.append(ringItem(for: mo, showLabel: true)) }
                 if items.isEmpty {
                     items.append(RingSlotItem(label: "", outerFraction: 0, innerFraction: 0))
                 }
                 groups = [(prefix: nil, items: items)]
             case .dualRingFiveHour:
-                if let fh = provider.fiveHour {
-                    groups = [(prefix: nil, items: [ringItem(for: fh, showLabel: true)])]
-                } else if let wk = provider.weekly {
-                    groups = [(prefix: nil, items: [ringItem(for: wk, showLabel: true)])]
+                if let w = provider.fiveHour ?? fallbackPrimary {
+                    groups = [(prefix: nil, items: [ringItem(for: w, showLabel: true)])]
                 }
             case .dualRingWeekly:
-                if let wk = provider.weekly {
-                    groups = [(prefix: nil, items: [ringItem(for: wk, showLabel: true)])]
-                } else if let fh = provider.fiveHour {
-                    groups = [(prefix: nil, items: [ringItem(for: fh, showLabel: true)])]
+                if let w = provider.weekly ?? fallbackPrimary {
+                    groups = [(prefix: nil, items: [ringItem(for: w, showLabel: true)])]
+                }
+            case .dualRingMonthly:
+                if let w = provider.monthly ?? fallbackPrimary {
+                    groups = [(prefix: nil, items: [ringItem(for: w, showLabel: true)])]
                 }
             case .ringWithWeeklyPct:
-                if let wk = provider.weekly {
-                    groups = [(prefix: nil, items: [ringItem(for: wk, showLabel: false)])]
-                    title = " \(wk.percent)%"
-                } else if let fh = provider.fiveHour {
-                    groups = [(prefix: nil, items: [ringItem(for: fh, showLabel: false)])]
-                    title = " \(fh.percent)%"
-                }
-            case .ringWithBothPct:
-                let primary = provider.weekly ?? provider.fiveHour
-                if let w = primary {
+                if let w = fallbackPrimary {
                     groups = [(prefix: nil, items: [ringItem(for: w, showLabel: false)])]
-                }
-                if let fh = provider.fiveHour, let wk = provider.weekly {
-                    title = " \(fh.percent)% | \(wk.percent)%"
-                } else if let w = primary {
                     title = " \(w.percent)%"
                 }
+            case .ringWithBothPct:
+                if let w = fallbackPrimary {
+                    groups = [(prefix: nil, items: [ringItem(for: w, showLabel: false)])]
+                }
+                let pcts = [provider.fiveHour, provider.weekly, provider.monthly].compactMap { $0 }.map { "\($0.percent)%" }
+                title = pcts.isEmpty ? "" : " " + pcts.joined(separator: " | ")
             case .fullText:
-                let primary = provider.weekly ?? provider.fiveHour
-                if let w = primary {
+                if let w = fallbackPrimary {
                     groups = [(prefix: nil, items: [ringItem(for: w, showLabel: false)])]
                 }
                 var parts: [String] = []
                 if let fh = provider.fiveHour { parts.append("5h \(fh.percent)%") }
                 if let wk = provider.weekly { parts.append("周 \(wk.percent)%") }
+                if let mo = provider.monthly { parts.append("月 \(mo.percent)%") }
                 title = parts.isEmpty ? "" : " " + parts.joined(separator: " · ")
             }
 
@@ -434,6 +431,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if let wk = p.weekly {
                 let cd = formatShortCountdown(from: wk.resetTime)
                 segs.append("周 \(wk.percent)%" + (cd.isEmpty ? "" : "(\(cd))"))
+            }
+            if let mo = p.monthly {
+                let cd = formatShortCountdown(from: mo.resetTime)
+                segs.append("月 \(mo.percent)%" + (cd.isEmpty ? "" : "(\(cd))"))
             }
             if !segs.isEmpty {
                 tipLines.append("\(p.name)：" + segs.joined(separator: " · "))

@@ -4,10 +4,10 @@
   "shortBadge": "Cu",
   "planTier": "Pro",
   "updatedAt": "2026-11-24T10:40:00Z",
-  "weekly": {
-    "label": "周额度",
+  "monthly": {
+    "label": "月额度",
     "remainingPercent": 80,
-    "resetTime": "2026-12-01T10:40:00Z",
-    "windowMinutes": 10080
+    "resetTime": "2026-12-24T10:40:00Z",
+    "windowMinutes": 43200
   }
 }
