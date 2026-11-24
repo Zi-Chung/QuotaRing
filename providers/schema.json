@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quotaring.dev/schemas/provider-slot.v1.json",
+  "title": "QuotaRing Open Provider Slot",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique lowercase provider identifier (defaults to filename stem)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name shown in the dropdown menu and tooltip."
+    },
+    "shortBadge": {
+      "type": "string",
+      "maxLength": 2,
+      "description": "1-2 character badge used in multi-brand menu bar mode (e.g., Cu, G)."
+    },
+    "planTier": {
+      "type": "string",
+      "description": "Optional subscription tier label (e.g., Pro, Ultra, Team)."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this snapshot was produced."
+    },
+    "fiveHour": { "$ref": "#/$defs/window" },
+    "weekly": { "$ref": "#/$defs/window" },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["displayName", "buckets"],
+        "properties": {
+          "displayName": { "type": "string" },
+          "description": { "type": "string" },
+          "buckets": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/bucket" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "window": {
+      "type": "object",
+      "properties": {
+        "label": { "type": "string" },
+        "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "remainingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "resetTime": { "type": "string", "format": "date-time" },
+        "resetsAt": { "type": "number", "description": "Unix timestamp in seconds or milliseconds." },
+        "windowMinutes": { "type": "number", "minimum": 1 }
+      }
+    },
+    "bucket": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "displayName": { "type": "string" },
+        "window": { "type": "string", "enum": ["5h", "weekly", "other"] },
+        "remainingPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "usedPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "remainingFraction": { "type": "number", "minimum": 0, "maximum": 1 },
+        "resetTime": { "type": "string", "format": "date-time" },
+        "resetsAt": { "type": "number" },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}

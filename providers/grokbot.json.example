@@ -1,0 +1,19 @@
+{
+  "id": "grokbot",
+  "name": "GrokBot",
+  "shortBadge": "G",
+  "planTier": "SuperGrok",
+  "updatedAt": "2026-11-24T10:40:00Z",
+  "fiveHour": {
+    "label": "5 小时额度",
+    "remainingPercent": 90,
+    "resetTime": "2026-11-24T15:40:00Z",
+    "windowMinutes": 300
+  },
+  "weekly": {
+    "label": "周额度",
+    "remainingPercent": 75,
+    "resetTime": "2026-12-01T10:40:00Z",
+    "windowMinutes": 10080
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "monitor": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/src/server.mjs",
+        "--data_dir=${PLUGIN_DATA}"
+      ]
+    }
+  }
+}

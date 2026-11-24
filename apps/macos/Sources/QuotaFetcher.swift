@@ -1,0 +1,511 @@
+import Foundation
+
+// MARK: - Unified Multi-Provider Models
+
+struct QuotaWindow {
+    let label: String          // e.g. "5 小时额度", "周额度"
+    let shortTag: String       // e.g. "5", "W"
+    let percent: Int           // remaining percent 0..100
+    let resetTime: String      // ISO8601 string
+    let windowSeconds: TimeInterval
+}
+
+struct ModelBucketInfo {
+    let id: String
+    let displayName: String
+    let window: String
+    let percent: Int
+    let resetTime: String
+    let description: String
+}
+
+struct ModelGroupInfo {
+    let displayName: String
+    let description: String
+    var buckets: [ModelBucketInfo]
+}
+
+struct ProviderQuota {
+    let id: String             // "antigravity", "codex", "cursor", "grokbot", ...
+    let name: String           // "Antigravity", "Codex", "Cursor", ...
+    let shortBadge: String     // "A", "C", "Cu", "G", ...
+    let symbolName: String     // SF Symbol name for menu header
+    let sourceLabel: String    // "官方 agy CLI 快照", "本地 ~/.codex 会话日志", "开放插槽"
+    var planTier: String?
+    var syncedAt: Date?
+    var fiveHour: QuotaWindow?
+    var weekly: QuotaWindow?
+    var groups: [ModelGroupInfo]
+}
+
+struct MultiQuotaSnapshot {
+    let providers: [ProviderQuota]
+    let providersDirPath: String
+    let fetchedAt: Date
+}
+
+// MARK: - Antigravity Snapshot Decoding
+
+private struct AgySnapshotModel: Decodable {
+    let id: String?
+    let display_name: String?
+}
+
+private struct AgySnapshotBucket: Decodable {
+    let id: String
+    let remainingFraction: Double?
+    let remainingAmount: Double?
+    let resetTime: String?
+    let resetInSeconds: Int?
+    let disabled: Bool?
+}
+
+private struct AgySnapshotFile: Decodable {
+    let version: Int?
+    let source: String?
+    let updatedAt: String?
+    let planTier: String?
+    let model: AgySnapshotModel?
+    let buckets: [AgySnapshotBucket]?
+}
+
+// MARK: - Open Slot Provider JSON Decoding
+
+private struct SlotWindowInput: Decodable {
+    let label: String?
+    let remainingPercent: Double?
+    let usedPercent: Double?
+    let remainingFraction: Double?
+    let resetTime: String?
+    let resetsAt: Double?
+    let windowMinutes: Double?
+}
+
+private struct SlotBucketInput: Decodable {
+    let id: String?
+    let displayName: String?
+    let window: String?
+    let remainingPercent: Double?
+    let usedPercent: Double?
+    let remainingFraction: Double?
+    let resetTime: String?
+    let resetsAt: Double?
+    let description: String?
+}
+
+private struct SlotGroupInput: Decodable {
+    let displayName: String
+    let description: String?
+    let buckets: [SlotBucketInput]?
+}
+
+private struct SlotProviderFile: Decodable {
+    let id: String?
+    let name: String?
+    let shortBadge: String?
+    let shortName: String?
+    let planTier: String?
+    let updatedAt: String?
+    let fiveHour: SlotWindowInput?
+    let weekly: SlotWindowInput?
+    let groups: [SlotGroupInput]?
+}
+
+// MARK: - Local Read-Only Multi-Provider Fetcher
+
+class QuotaFetcher {
+    static let shared = QuotaFetcher()
+
+    let agySnapshotURL: URL = {
+        if let envPath = ProcessInfo.processInfo.environment["AGY_QUOTA_SNAPSHOT"], !envPath.isEmpty {
+            return URL(fileURLWithPath: envPath)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity-cli/quota-snapshot.json")
+    }()
+
+    let codexSessionsDir: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions")
+    }()
+
+    let openSlotsDir: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/quota-bar/providers")
+    }()
+
+    private func parseISO8601(_ str: String?) -> Date? {
+        guard let str = str, !str.isEmpty else { return nil }
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = fmt.date(from: str) { return d }
+        fmt.formatOptions = [.withInternetDateTime]
+        return fmt.date(from: str)
+    }
+
+    private func toISO8601(_ date: Date) -> String {
+        let fmt = ISO8601DateFormatter()
+        fmt.formatOptions = [.withInternetDateTime]
+        return fmt.string(from: date)
+    }
+
+    private func resolvePercent(remainingPercent: Double?, usedPercent: Double?, remainingFraction: Double?) -> Int? {
+        if let rp = remainingPercent {
+            return Int(round(max(0.0, min(100.0, rp))))
+        }
+        if let rf = remainingFraction {
+            return Int(round(max(0.0, min(1.0, rf)) * 100.0))
+        }
+        if let up = usedPercent {
+            return Int(round(max(0.0, min(100.0, 100.0 - up))))
+        }
+        return nil
+    }
+
+    private func resolveResetISO(resetTime: String?, resetsAt: Double?) -> String {
+        if let rt = resetTime, !rt.isEmpty { return rt }
+        if let ts = resetsAt, ts > 0 {
+            let seconds = ts > 1_000_000_000_000 ? ts / 1000.0 : ts
+            return toISO8601(Date(timeIntervalSince1970: seconds))
+        }
+        return ""
+    }
+
+    func fetchAll(completion: @escaping (MultiQuotaSnapshot) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            try? FileManager.default.createDirectory(at: self.openSlotsDir, withIntermediateDirectories: true)
+
+            var providers: [ProviderQuota] = []
+            if let agy = self.loadAntigravity() {
+                providers.append(agy)
+            }
+            if let codex = self.loadCodex() {
+                providers.append(codex)
+            }
+            for sp in self.loadOpenSlots() {
+                if let idx = providers.firstIndex(where: { $0.id == sp.id }) {
+                    providers[idx] = sp
+                } else {
+                    providers.append(sp)
+                }
+            }
+
+            let snapshot = MultiQuotaSnapshot(
+                providers: providers,
+                providersDirPath: self.openSlotsDir.path,
+                fetchedAt: Date()
+            )
+            DispatchQueue.main.async {
+                completion(snapshot)
+            }
+        }
+    }
+
+    // MARK: 1. Antigravity Official CLI Snapshot
+
+    private func loadAntigravity() -> ProviderQuota? {
+        guard FileManager.default.fileExists(atPath: agySnapshotURL.path),
+              let data = try? Data(contentsOf: agySnapshotURL),
+              let snap = try? JSONDecoder().decode(AgySnapshotFile.self, from: data),
+              let buckets = snap.buckets, !buckets.isEmpty else {
+            return nil
+        }
+
+        var fiveHour: QuotaWindow?
+        var weekly: QuotaWindow?
+        var geminiBuckets: [ModelBucketInfo] = []
+        var thirdPartyBuckets: [ModelBucketInfo] = []
+        var otherBuckets: [ModelBucketInfo] = []
+
+        for b in buckets {
+            let fraction = max(0.0, min(1.0, b.remainingFraction ?? 1.0))
+            let percent = Int(round(fraction * 100.0))
+            let reset = b.resetTime ?? ""
+            let lowerId = b.id.lowercased()
+            let isWeekly = lowerId.contains("weekly")
+            let is5h = lowerId.contains("5h")
+            let window = isWeekly ? "weekly" : (is5h ? "5h" : "other")
+            let label = isWeekly ? "周额度" : (is5h ? "5 小时额度" : b.id)
+
+            let info = ModelBucketInfo(
+                id: b.id,
+                displayName: label,
+                window: window,
+                percent: percent,
+                resetTime: reset,
+                description: b.id
+            )
+
+            if lowerId.hasPrefix("gemini") {
+                geminiBuckets.append(info)
+                if is5h {
+                    fiveHour = QuotaWindow(label: "5 小时额度", shortTag: "5", percent: percent, resetTime: reset, windowSeconds: 5 * 3600)
+                } else if isWeekly {
+                    weekly = QuotaWindow(label: "周额度", shortTag: "W", percent: percent, resetTime: reset, windowSeconds: 7 * 24 * 3600)
+                }
+            } else if lowerId.hasPrefix("3p") || lowerId.contains("claude") || lowerId.contains("gpt") {
+                thirdPartyBuckets.append(info)
+            } else {
+                otherBuckets.append(info)
+            }
+        }
+
+        let sortOrder: (ModelBucketInfo, ModelBucketInfo) -> Bool = { a, b in
+            let rank: (String) -> Int = { $0 == "5h" ? 0 : ($0 == "weekly" ? 1 : 2) }
+            if rank(a.window) != rank(b.window) { return rank(a.window) < rank(b.window) }
+            return a.id < b.id
+        }
+
+        var groups: [ModelGroupInfo] = []
+        if !geminiBuckets.isEmpty {
+            groups.append(ModelGroupInfo(displayName: "Google Gemini", description: "Gemini 系列模型配额池", buckets: geminiBuckets.sorted(by: sortOrder)))
+        }
+        if !thirdPartyBuckets.isEmpty {
+            groups.append(ModelGroupInfo(displayName: "第三方模型 (3P)", description: "Claude / GPT 等第三方模型", buckets: thirdPartyBuckets.sorted(by: sortOrder)))
+        }
+        if !otherBuckets.isEmpty {
+            groups.append(ModelGroupInfo(displayName: "其他配额", description: "", buckets: otherBuckets.sorted(by: sortOrder)))
+        }
+
+        return ProviderQuota(
+            id: "antigravity",
+            name: "Antigravity",
+            shortBadge: "A",
+            symbolName: "sparkles",
+            sourceLabel: "官方 agy CLI 快照",
+            planTier: snap.planTier,
+            syncedAt: parseISO8601(snap.updatedAt),
+            fiveHour: fiveHour,
+            weekly: weekly,
+            groups: groups
+        )
+    }
+
+    // MARK: 2. Codex Local Session Log Reader
+
+    private func loadCodex() -> ProviderQuota? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: codexSessionsDir.path) else { return nil }
+
+        var candidates: [(url: URL, mtime: Date)] = []
+        if let enumerator = fm.enumerator(
+            at: codexSessionsDir,
+            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                guard fileURL.pathExtension == "jsonl" else { continue }
+                if let vals = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                   vals.isRegularFile == true {
+                    candidates.append((url: fileURL, mtime: vals.contentModificationDate ?? .distantPast))
+                }
+            }
+        }
+
+        guard !candidates.isEmpty else { return nil }
+        candidates.sort { $0.mtime > $1.mtime }
+
+        for item in candidates.prefix(12) {
+            if let parsed = parseCodexRateLimits(from: item.url, fallbackDate: item.mtime) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    private func parseCodexRateLimits(from fileURL: URL, fallbackDate: Date) -> ProviderQuota? {
+        guard let data = try? Data(contentsOf: fileURL),
+              let content = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: true)
+        for lineSub in lines.reversed() {
+            guard lineSub.contains("\"rate_limits\"") else { continue }
+            guard let lineData = lineSub.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let payload = json["payload"] as? [String: Any],
+                  let rateLimits = payload["rate_limits"] as? [String: Any] else {
+                continue
+            }
+
+            let primary = rateLimits["primary"] as? [String: Any]
+            let secondary = rateLimits["secondary"] as? [String: Any]
+            guard primary != nil || secondary != nil else { continue }
+
+            let eventTime = parseISO8601(json["timestamp"] as? String) ?? fallbackDate
+            let planType = rateLimits["plan_type"] as? String
+
+            var fiveHour: QuotaWindow?
+            var weekly: QuotaWindow?
+            var buckets: [ModelBucketInfo] = []
+
+            for w in [primary, secondary].compactMap({ $0 }) {
+                guard let usedPct = w["used_percent"] as? Double else { continue }
+                let remainingPct = Int(round(max(0.0, min(100.0, 100.0 - usedPct))))
+                let windowMinutes = (w["window_minutes"] as? Double) ?? Double(w["window_minutes"] as? Int ?? 0)
+                let resetEpoch = (w["resets_at"] as? Double) ?? Double(w["resets_at"] as? Int ?? 0)
+                let resetIso = resetEpoch > 0 ? toISO8601(Date(timeIntervalSince1970: resetEpoch)) : ""
+
+                if windowMinutes > 0 && windowMinutes <= 360 {
+                    let secs = windowMinutes * 60.0
+                    let hours = Int(round(windowMinutes / 60.0))
+                    let label = "\(hours) 小时额度"
+                    fiveHour = QuotaWindow(label: label, shortTag: "\(hours)", percent: remainingPct, resetTime: resetIso, windowSeconds: secs)
+                    buckets.append(ModelBucketInfo(id: "codex-5h", displayName: label, window: "5h", percent: remainingPct, resetTime: resetIso, description: ""))
+                } else {
+                    let secs = windowMinutes > 0 ? windowMinutes * 60.0 : 7 * 24 * 3600
+                    let label = windowMinutes == 10080 || windowMinutes == 0 ? "周额度" : "\(Int(round(windowMinutes / 1440.0))) 天额度"
+                    weekly = QuotaWindow(label: label, shortTag: "W", percent: remainingPct, resetTime: resetIso, windowSeconds: secs)
+                    buckets.append(ModelBucketInfo(id: "codex-weekly", displayName: label, window: "weekly", percent: remainingPct, resetTime: resetIso, description: ""))
+                }
+            }
+
+            guard !buckets.isEmpty else { continue }
+
+            let tierLabel: String? = planType.map { raw in
+                switch raw.lowercased() {
+                case "prolite": return "Pro Lite"
+                case "pro": return "Pro"
+                case "plus": return "Plus"
+                case "team": return "Team"
+                default: return raw
+                }
+            }
+
+            return ProviderQuota(
+                id: "codex",
+                name: "Codex",
+                shortBadge: "C",
+                symbolName: "terminal",
+                sourceLabel: "本地 ~/.codex 会话日志",
+                planTier: tierLabel,
+                syncedAt: eventTime,
+                fiveHour: fiveHour,
+                weekly: weekly,
+                groups: [
+                    ModelGroupInfo(
+                        displayName: "OpenAI Codex",
+                        description: "来自本地会话日志 rate_limits",
+                        buckets: buckets.sorted { ($0.window == "5h" ? 0 : 1) < ($1.window == "5h" ? 0 : 1) }
+                    )
+                ]
+            )
+        }
+        return nil
+    }
+
+    // MARK: 3. Open Provider Slots
+
+    private func loadOpenSlots() -> [ProviderQuota] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: openSlotsDir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else {
+            return []
+        }
+
+        let jsonFiles = items
+            .filter { $0.pathExtension.lowercased() == "json" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+
+        var results: [ProviderQuota] = []
+        for fileURL in jsonFiles {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let slot = try? JSONDecoder().decode(SlotProviderFile.self, from: data) else {
+                continue
+            }
+
+            let stem = fileURL.deletingPathExtension().lastPathComponent
+            let id = (slot.id?.isEmpty == false ? slot.id! : stem).lowercased()
+            let name = (slot.name?.isEmpty == false) ? slot.name! : stem.capitalized
+            let rawBadge = slot.shortBadge ?? slot.shortName ?? String(name.prefix(2))
+            let badge = String(rawBadge.prefix(2)).uppercased()
+
+            let mtime = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let syncedAt = parseISO8601(slot.updatedAt) ?? mtime
+
+            var fiveHour: QuotaWindow?
+            if let fh = slot.fiveHour,
+               let pct = resolvePercent(remainingPercent: fh.remainingPercent, usedPercent: fh.usedPercent, remainingFraction: fh.remainingFraction) {
+                let mins = fh.windowMinutes ?? 300.0
+                fiveHour = QuotaWindow(
+                    label: fh.label ?? "5 小时额度",
+                    shortTag: "5",
+                    percent: pct,
+                    resetTime: resolveResetISO(resetTime: fh.resetTime, resetsAt: fh.resetsAt),
+                    windowSeconds: mins * 60.0
+                )
+            }
+
+            var weekly: QuotaWindow?
+            if let wk = slot.weekly,
+               let pct = resolvePercent(remainingPercent: wk.remainingPercent, usedPercent: wk.usedPercent, remainingFraction: wk.remainingFraction) {
+                let mins = wk.windowMinutes ?? 10080.0
+                weekly = QuotaWindow(
+                    label: wk.label ?? "周额度",
+                    shortTag: "W",
+                    percent: pct,
+                    resetTime: resolveResetISO(resetTime: wk.resetTime, resetsAt: wk.resetsAt),
+                    windowSeconds: mins * 60.0
+                )
+            }
+
+            var groups: [ModelGroupInfo] = []
+            if let customGroups = slot.groups, !customGroups.isEmpty {
+                for g in customGroups {
+                    let bs: [ModelBucketInfo] = (g.buckets ?? []).compactMap { b in
+                        guard let pct = resolvePercent(remainingPercent: b.remainingPercent, usedPercent: b.usedPercent, remainingFraction: b.remainingFraction) else {
+                            return nil
+                        }
+                        return ModelBucketInfo(
+                            id: b.id ?? UUID().uuidString,
+                            displayName: b.displayName ?? "额度",
+                            window: b.window ?? "other",
+                            percent: pct,
+                            resetTime: resolveResetISO(resetTime: b.resetTime, resetsAt: b.resetsAt),
+                            description: b.description ?? ""
+                        )
+                    }
+                    if !bs.isEmpty {
+                        groups.append(ModelGroupInfo(displayName: g.displayName, description: g.description ?? "", buckets: bs))
+                    }
+                }
+            } else {
+                var autoBuckets: [ModelBucketInfo] = []
+                if let fh = fiveHour {
+                    autoBuckets.append(ModelBucketInfo(id: "\(id)-5h", displayName: fh.label, window: "5h", percent: fh.percent, resetTime: fh.resetTime, description: ""))
+                }
+                if let wk = weekly {
+                    autoBuckets.append(ModelBucketInfo(id: "\(id)-weekly", displayName: wk.label, window: "weekly", percent: wk.percent, resetTime: wk.resetTime, description: ""))
+                }
+                if !autoBuckets.isEmpty {
+                    groups.append(ModelGroupInfo(displayName: name, description: "来自开放插槽 \(fileURL.lastPathComponent)", buckets: autoBuckets))
+                }
+            }
+
+            guard fiveHour != nil || weekly != nil || !groups.isEmpty else { continue }
+
+            let symbol: String
+            switch id {
+            case "cursor": symbol = "cube"
+            case "grokbot", "grok": symbol = "bolt.circle"
+            case "claude", "claudecode": symbol = "bubble.left.and.bubble.right"
+            default: symbol = "puzzlepiece.extension"
+            }
+
+            results.append(ProviderQuota(
+                id: id,
+                name: name,
+                shortBadge: badge,
+                symbolName: symbol,
+                sourceLabel: "开放插槽 (\(fileURL.lastPathComponent))",
+                planTier: slot.planTier,
+                syncedAt: syncedAt,
+                fiveHour: fiveHour,
+                weekly: weekly,
+                groups: groups
+            ))
+        }
+
+        return results
+    }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "quota-monitor",
+  "displayName": "Quota Monitor",
+  "version": "1.0.0",
+  "description": "Monitor Antigravity weekly and rolling model quotas synced from the official agy CLI statusLine, with live reset countdowns in a side pane.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开配额监控面板，查看当前周额度与重置时间",
+    "检查我最近的配额同步状态和剩余比例",
+    "如何启动 agy CLI 来实时同步我的周额度？"
+  ]
+}

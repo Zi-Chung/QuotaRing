@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build macOS Universal App
+        run: bash apps/macos/build.sh --universal
+      - name: Verify Universal Binary
+        run: lipo -info apps/macos/build/QuotaRing.app/Contents/MacOS/QuotaRing
+
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build Windows Tray App
+        shell: pwsh
+        run: .\apps\windows\build.ps1
+      - name: Verify Executable Exists
+        shell: pwsh
+        run: Test-Path apps/windows/publish/QuotaRing.exe
+
+  antigravity-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install & Build Plugin UI
+        working-directory: plugin/quota-monitor
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          test -s dist/app.html
+      - name: Smoke Test statusLine Script
+        working-directory: plugin/quota-monitor
+        run: |
+          echo '{"plan_tier":"Pro","quota":{"gemini-weekly":{"remaining_fraction":0.8,"reset_time":"2026-12-01T00:00:00Z","reset_in_seconds":604800}}}' | AGY_QUOTA_SNAPSHOT=/tmp/ci-snap.json node bin/statusline.mjs
+          test -s /tmp/ci-snap.json

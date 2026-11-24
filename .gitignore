@@ -1,0 +1,18 @@
+# macOS & Xcode
+.DS_Store
+apps/macos/build/
+*.dSYM
+
+# Windows & .NET
+apps/windows/bin/
+apps/windows/obj/
+apps/windows/publish/
+
+# Node / Plugin
+plugin/quota-monitor/node_modules/
+plugin/quota-monitor/dist/
+
+# Misc
+*.log
+*.tmp
+.env
