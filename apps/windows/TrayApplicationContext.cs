@@ -8,7 +8,8 @@ namespace QuotaRing;
 internal sealed class UserPrefs
 {
     public string SelectedProviderId { get; set; } = "antigravity";
-    public string SelectedWindow { get; set; } = "5h"; // "5h" or "weekly"
+    public string SelectedWindow { get; set; } = "5h"; // "5h", "weekly", or "monthly"
+    public string HotKeyPreset { get; set; } = "alt-q"; // "alt-q", "alt-r", "alt-1", "off"
     public int RefreshSeconds { get; set; } = 30;
 }
 
@@ -19,6 +20,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _timer;
+    private readonly GlobalHotKeyWindow _hotKeyWindow;
     private readonly string _prefsPath;
     private UserPrefs _prefs;
     private MultiQuotaSnapshot? _latestSnapshot;
@@ -50,11 +52,29 @@ public sealed class TrayApplicationContext : ApplicationContext
             }
         };
 
+        _hotKeyWindow = new GlobalHotKeyWindow(SummonFromHotKey);
+        _hotKeyWindow.RegisterPreset(_prefs.HotKeyPreset);
+
         _timer = new System.Windows.Forms.Timer { Interval = Math.Max(10, _prefs.RefreshSeconds) * 1000 };
         _timer.Tick += (_, _) => RefreshData();
 
         RefreshData();
         _timer.Start();
+    }
+
+    private void SummonFromHotKey()
+    {
+        RefreshData();
+        var menu = _notifyIcon.ContextMenuStrip;
+        if (menu is null) return;
+        if (menu.Visible)
+        {
+            menu.Close();
+            return;
+        }
+        GlobalHotKeyWindow.SetForegroundWindow(_hotKeyWindow.Handle);
+        var wa = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1280, 720);
+        menu.Show(new Point(wa.Right - 16, wa.Bottom - 12), ToolStripDropDownDirection.AboveLeft);
     }
 
     private UserPrefs LoadPrefs()
@@ -271,6 +291,23 @@ public sealed class TrayApplicationContext : ApplicationContext
         }
         menu.Items.Add(intervalMenu);
 
+        // Global hotkey selector (2-key summon even when hidden in overflow tray)
+        var hotKeyMenu = new ToolStripMenuItem("全局唤起快捷键");
+        foreach (var (code, label) in new[] { ("alt-q", "Alt + Q（推荐）"), ("alt-r", "Alt + R"), ("alt-1", "Alt + 1"), ("off", "关闭") })
+        {
+            var hkItem = new ToolStripMenuItem(label) { Checked = _prefs.HotKeyPreset == code };
+            string capturedCode = code;
+            hkItem.Click += (_, _) =>
+            {
+                _prefs.HotKeyPreset = capturedCode;
+                SavePrefs();
+                _hotKeyWindow.RegisterPreset(capturedCode);
+                RefreshData();
+            };
+            hotKeyMenu.DropDownItems.Add(hkItem);
+        }
+        menu.Items.Add(hotKeyMenu);
+
         menu.Items.Add(new ToolStripSeparator());
 
         var refreshItem = new ToolStripMenuItem("立即读取全部快照");
@@ -336,6 +373,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _timer.Stop();
         _timer.Dispose();
+        _hotKeyWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
         _currentIcon?.Dispose();

@@ -187,14 +187,26 @@ func makeDualRingStripImage(groups: [(prefix: String?, items: [RingSlotItem])]) 
     return image
 }
 
+// MARK: - Floating Notch-Fallback Panel
+
+final class FloatingQuotaPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+
+    override func cancelOperation(_ sender: Any?) {
+        orderOut(sender)
+    }
+}
+
 // MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var popover: NSPopover!
+    var floatingPanel: FloatingQuotaPanel?
     let viewModel = QuotaViewModel()
     var timer: Timer?
     var eventMonitor: Any?
+    var localKeyMonitor: Any?
     var isFetching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -208,6 +220,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let savedInterval = UserDefaults.standard.value(forKey: "QuotaRing.RefreshInterval") as? Double,
            savedInterval >= 10.0 {
             viewModel.refreshInterval = savedInterval
+        }
+        if let savedHotKey = UserDefaults.standard.value(forKey: "QuotaRing.HotKeyPreset") as? Int,
+           let preset = HotKeyPreset(rawValue: savedHotKey) {
+            viewModel.hotKeyPreset = preset
         }
         viewModel.launchAtLogin = isLaunchAtLoginEnabled()
 
@@ -226,25 +242,147 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             button.imagePosition = .imageOnly
             button.image = makeDualRingStripImage(groups: [(prefix: nil, items: [RingSlotItem(label: "", outerFraction: 0, innerFraction: 0)])])
             button.title = ""
-            button.toolTip = "QuotaRing — 点击展开配额面板"
+            button.toolTip = "QuotaRing — 点击或按 \(viewModel.hotKeyPreset.shortBadge) 展开配额面板"
             button.action = #selector(togglePopover(_:))
             button.target = self
         }
 
-        // Dismiss popover when clicking outside even when another app is active
+        // Dismiss popover or floating panel when clicking outside
         eventMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            if let pop = self?.popover, pop.isShown {
-                pop.performClose(nil)
-            }
+            self?.closeAllPanels()
         }
+
+        // Dismiss on Escape when active
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { // Escape
+                self?.closeAllPanels()
+                return nil
+            }
+            return event
+        }
+
+        // Register 2-key global hotkey (default: Option + Q)
+        registerActiveHotKey()
 
         fetchData()
         startTimer()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        GlobalHotKeyManager.shared.unregister()
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+        }
+    }
+
+    private func registerActiveHotKey() {
+        GlobalHotKeyManager.shared.register(preset: viewModel.hotKeyPreset) { [weak self] in
+            self?.toggleFromHotKey()
+        }
+    }
+
+    private func closeAllPanels() {
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        if let panel = floatingPanel, panel.isVisible {
+            panel.orderOut(nil)
+        }
+    }
+
+    private func isStatusItemVisibleOnScreen() -> Bool {
+        guard let button = statusItem.button,
+              let win = button.window,
+              win.isVisible,
+              win.occlusionState.contains(.visible) else {
+            return false
+        }
+        let frame = win.frame
+        guard frame.width > 4, frame.height > 4 else { return false }
+        let screen = win.screen ?? NSScreen.main
+        if let screen = screen, let auxRight = screen.auxiliaryTopRightArea {
+            // On notched Macs, items pushed left of the notch or clipped outside auxiliaryTopRightArea are hidden
+            if frame.minX < auxRight.minX - 2 {
+                return false
+            }
+        }
+        return true
+    }
+
+    private func showFloatingPanel() {
+        let panel: FloatingQuotaPanel
+        if let existing = floatingPanel {
+            panel = existing
+        } else {
+            let p = FloatingQuotaPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 340, height: 420),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.hasShadow = true
+            p.level = .statusBar
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+
+            let visualEffect = NSVisualEffectView()
+            visualEffect.material = .popover
+            visualEffect.blendingMode = .behindWindow
+            visualEffect.state = .active
+            visualEffect.wantsLayer = true
+            visualEffect.layer?.cornerRadius = 14
+            visualEffect.layer?.masksToBounds = true
+            visualEffect.layer?.borderWidth = 0.8
+            visualEffect.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+
+            let host = NSHostingView(rootView: PopoverView(vm: viewModel))
+            host.translatesAutoresizingMaskIntoConstraints = false
+            visualEffect.addSubview(host)
+            NSLayoutConstraint.activate([
+                host.leadingAnchor.constraint(equalTo: visualEffect.leadingAnchor),
+                host.trailingAnchor.constraint(equalTo: visualEffect.trailingAnchor),
+                host.topAnchor.constraint(equalTo: visualEffect.topAnchor),
+                host.bottomAnchor.constraint(equalTo: visualEffect.bottomAnchor)
+            ])
+
+            p.contentView = visualEffect
+            floatingPanel = p
+            panel = p
+        }
+
+        // Fit panel height cleanly to content and position at top-right of active screen
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let fittingSize = panel.contentView?.fittingSize ?? NSSize(width: 340, height: 420)
+        let width: CGFloat = 340
+        let height: CGFloat = min(560, max(260, fittingSize.height))
+
+        let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) }) ?? NSScreen.main
+        if let screen = targetScreen {
+            let vf = screen.visibleFrame
+            let x = vf.maxX - width - 12
+            let y = vf.maxY - height - 8
+            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        }
+
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func toggleFromHotKey() {
+        if popover.isShown || (floatingPanel?.isVisible == true) {
+            closeAllPanels()
+            return
+        }
+        fetchData()
+        if isStatusItemVisibleOnScreen(), let button = statusItem.button {
+            NSApp.activate(ignoringOtherApps: true)
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else {
+            showFloatingPanel()
         }
     }
 
@@ -274,6 +412,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.setValue(sec, forKey: "QuotaRing.RefreshInterval")
             self.startTimer()
         }
+        viewModel.onHotKeyChanged = { [weak self] preset in
+            guard let self = self else { return }
+            self.viewModel.hotKeyPreset = preset
+            UserDefaults.standard.setValue(preset.rawValue, forKey: "QuotaRing.HotKeyPreset")
+            self.registerActiveHotKey()
+        }
         viewModel.onToggleLaunchAtLogin = { [weak self] in
             self?.toggleLaunchAtLogin()
         }
@@ -290,8 +434,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func togglePopover(_ sender: AnyObject?) {
         guard let button = statusItem.button else { return }
-        if popover.isShown {
-            popover.performClose(sender)
+        if popover.isShown || (floatingPanel?.isVisible == true) {
+            closeAllPanels()
         } else {
             fetchData()
             NSApp.activate(ignoringOtherApps: true)
@@ -447,7 +591,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func openSlotsFolder() {
         let dir = QuotaFetcher.shared.openSlotsDir
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        popover.performClose(nil)
+        closeAllPanels()
         NSWorkspace.shared.open(dir)
     }
 

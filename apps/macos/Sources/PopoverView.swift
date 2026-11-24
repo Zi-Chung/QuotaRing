@@ -8,6 +8,7 @@ final class QuotaViewModel: ObservableObject {
     @Published var selectedProviderId: String = "antigravity"
     @Published var displayFormat: DisplayFormat = .dualRingPair
     @Published var refreshInterval: TimeInterval = 30.0
+    @Published var hotKeyPreset: HotKeyPreset = .optionQ
     @Published var launchAtLogin: Bool = false
     @Published var isRefreshing: Bool = false
     @Published var copiedToast: Bool = false
@@ -16,6 +17,7 @@ final class QuotaViewModel: ObservableObject {
     var onProviderChanged: ((String) -> Void)?
     var onFormatChanged: ((DisplayFormat) -> Void)?
     var onIntervalChanged: ((TimeInterval) -> Void)?
+    var onHotKeyChanged: ((HotKeyPreset) -> Void)?
     var onToggleLaunchAtLogin: (() -> Void)?
     var onOpenSlotsFolder: (() -> Void)?
     var onCopyAgyCommand: (() -> Void)?
@@ -128,6 +130,15 @@ struct PopoverView: View {
                         .background(Color.accentColor.opacity(0.14))
                         .foregroundStyle(Color.accentColor)
                         .clipShape(Capsule())
+                    if !vm.hotKeyPreset.shortBadge.isEmpty {
+                        Text(vm.hotKeyPreset.shortBadge)
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.07))
+                            .foregroundStyle(.secondary)
+                            .clipShape(Capsule())
+                    }
                 }
                 HStack(spacing: 8) {
                     legendDot(color: Color(nsColor: .systemGreen), text: "外圈 剩余用量")
@@ -424,6 +435,24 @@ struct PopoverView: View {
                     Text("1分钟").tag(60.0)
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 155)
+                .controlSize(.small)
+            }
+
+            // Global hotkey picker (2-key summon even when menu bar is crowded)
+            HStack {
+                Text("全局唤起")
+                    .font(.system(size: 11.5))
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { vm.hotKeyPreset },
+                    set: { vm.onHotKeyChanged?($0) }
+                )) {
+                    ForEach(HotKeyPreset.allCases, id: \.self) { preset in
+                        Text(preset.title).tag(preset)
+                    }
+                }
                 .labelsHidden()
                 .frame(width: 155)
                 .controlSize(.small)

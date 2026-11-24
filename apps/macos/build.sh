@@ -16,6 +16,7 @@ fi
 
 SOURCES=(
   "${SCRIPT_DIR}/Sources/QuotaFetcher.swift"
+  "${SCRIPT_DIR}/Sources/GlobalHotKey.swift"
   "${SCRIPT_DIR}/Sources/PopoverView.swift"
   "${SCRIPT_DIR}/Sources/AppDelegate.swift"
   "${SCRIPT_DIR}/Sources/main.swift"
@@ -31,10 +32,10 @@ mkdir -p "${MODULE_CACHE}"
 if [[ "${UNIVERSAL}" == "true" ]]; then
   echo "==> Compiling Universal Binary (arm64 + x86_64)..."
   swiftc -O -module-cache-path "${MODULE_CACHE}" \
-    -target arm64-apple-macosx13.0 -framework Cocoa -framework SwiftUI \
+    -target arm64-apple-macosx13.0 -framework Cocoa -framework SwiftUI -framework Carbon \
     "${SOURCES[@]}" -o "${BUILD_DIR}/QuotaRing-arm64"
   swiftc -O -module-cache-path "${MODULE_CACHE}" \
-    -target x86_64-apple-macosx13.0 -framework Cocoa -framework SwiftUI \
+    -target x86_64-apple-macosx13.0 -framework Cocoa -framework SwiftUI -framework Carbon \
     "${SOURCES[@]}" -o "${BUILD_DIR}/QuotaRing-x86_64"
   lipo -create \
     "${BUILD_DIR}/QuotaRing-arm64" \
@@ -45,7 +46,7 @@ else
   HOST_ARCH="$(uname -m)"
   echo "==> Compiling for ${HOST_ARCH}..."
   swiftc -O -module-cache-path "${MODULE_CACHE}" \
-    -target "${HOST_ARCH}-apple-macosx13.0" -framework Cocoa -framework SwiftUI \
+    -target "${HOST_ARCH}-apple-macosx13.0" -framework Cocoa -framework SwiftUI -framework Carbon \
     "${SOURCES[@]}" -o "${MACOS_DIR}/QuotaRing"
 fi
 
