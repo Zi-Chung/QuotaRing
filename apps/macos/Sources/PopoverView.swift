@@ -21,6 +21,7 @@ final class QuotaViewModel: ObservableObject {
     var onToggleLaunchAtLogin: (() -> Void)?
     var onOpenSlotsFolder: (() -> Void)?
     var onCopyAgyCommand: (() -> Void)?
+    var onLaunchAgySync: (() -> Void)?
     var onQuit: (() -> Void)?
 }
 
@@ -276,30 +277,44 @@ struct PopoverView: View {
         let winSecs: TimeInterval = bucket.windowSeconds > 0
             ? bucket.windowSeconds
             : defaultWindowSeconds(for: bucket.window)
-        let outerFrac = Double(bucket.percent) / 100.0
-        let innerFrac = liveRemainingFraction(resetIso: bucket.resetTime, windowSeconds: winSecs, now: now)
+        let expired = isResetExpired(resetIso: bucket.resetTime, now: now)
+        let outerFrac = expired ? 0.0 : (Double(bucket.percent) / 100.0)
+        let innerFrac = expired ? 0.0 : liveRemainingFraction(resetIso: bucket.resetTime, windowSeconds: winSecs, now: now)
         let cd = liveCountdownText(resetIso: bucket.resetTime, now: now)
         let resetAbs = formatResetAbsolute(bucket.resetTime)
 
         return HStack(spacing: 10) {
             ColoredDualRingView(outerFraction: outerFrac, innerFraction: innerFrac, size: 28)
+                .opacity(expired ? 0.45 : 1.0)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(bucket.displayName)
                         .font(.system(size: 11.5, weight: .medium))
                     Spacer()
-                    Text("\(bucket.percent)%")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(percentColor(bucket.percent))
+                    if expired {
+                        Text("已重置")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("\(bucket.percent)%")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(percentColor(bucket.percent))
+                    }
                 }
 
                 HStack {
-                    Text(cd.isEmpty ? "重置时间未知" : "剩余 \(cd)")
-                        .font(.system(size: 10))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
+                    if expired {
+                        Text("上轮 \(bucket.percent)% · 点底部同步新周期")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(cd.isEmpty ? "重置时间未知" : "剩余 \(cd)")
+                            .font(.system(size: 10))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     if !resetAbs.isEmpty {
                         Text(resetAbs)
@@ -311,7 +326,7 @@ struct PopoverView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.035))
+        .background(Color.primary.opacity(expired ? 0.02 : 0.035))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
@@ -491,8 +506,18 @@ struct PopoverView: View {
 
             Text("·").foregroundStyle(.quaternary)
 
+            Button(action: { vm.onLaunchAgySync?() }) {
+                Label("终端同步", systemImage: "terminal")
+                    .font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .help("在系统终端打开 agy CLI 刷新官方配额快照")
+
+            Text("·").foregroundStyle(.quaternary)
+
             Button(action: { vm.onCopyAgyCommand?() }) {
-                Label(vm.copiedToast ? "已复制 agy" : "复制 agy", systemImage: vm.copiedToast ? "checkmark" : "terminal")
+                Label(vm.copiedToast ? "已复制" : "复制 agy", systemImage: vm.copiedToast ? "checkmark" : "doc.on.doc")
                     .font(.system(size: 11))
             }
             .buttonStyle(.plain)
@@ -512,6 +537,11 @@ struct PopoverView: View {
     }
 
     // MARK: Live Time Formatters
+
+    private func isResetExpired(resetIso: String, now: Date) -> Bool {
+        guard let target = parseISO8601Date(resetIso) else { return false }
+        return target.timeIntervalSince(now) <= 0
+    }
 
     private func liveRemainingFraction(resetIso: String, windowSeconds: TimeInterval, now: Date) -> Double {
         guard windowSeconds > 0, let target = parseISO8601Date(resetIso) else { return 0.0 }

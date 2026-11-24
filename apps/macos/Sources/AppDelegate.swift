@@ -427,6 +427,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         viewModel.onCopyAgyCommand = { [weak self] in
             self?.copyAgyCommand()
         }
+        viewModel.onLaunchAgySync = { [weak self] in
+            self?.launchAgyInTerminal()
+        }
         viewModel.onQuit = {
             NSApplication.shared.terminate(nil)
         }
@@ -465,10 +468,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ringItem(for window: QuotaWindow, showLabel: Bool) -> RingSlotItem {
-        RingSlotItem(
+        let expired: Bool
+        if let target = parseISO8601Date(window.resetTime), target.timeIntervalSinceNow <= 0 {
+            expired = true
+        } else {
+            expired = false
+        }
+        return RingSlotItem(
             label: showLabel ? window.shortTag : "",
-            outerFraction: Double(window.percent) / 100.0,
-            innerFraction: remainingTimeFraction(resetIso: window.resetTime, windowSeconds: window.windowSeconds)
+            outerFraction: expired ? 0.0 : (Double(window.percent) / 100.0),
+            innerFraction: expired ? 0.0 : remainingTimeFraction(resetIso: window.resetTime, windowSeconds: window.windowSeconds)
         )
     }
 
@@ -593,6 +602,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         closeAllPanels()
         NSWorkspace.shared.open(dir)
+    }
+
+    private func launchAgyInTerminal() {
+        closeAllPanels()
+        let localAgy = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".gemini/bin/agy").path
+        let cmd = FileManager.default.fileExists(atPath: localAgy) ? localAgy : "agy"
+        let escaped = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", script]
+        try? task.run()
     }
 
     private func copyAgyCommand() {

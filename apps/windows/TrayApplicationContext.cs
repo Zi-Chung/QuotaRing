@@ -136,7 +136,7 @@ public sealed class TrayApplicationContext : ApplicationContext
         if (!resetTime.HasValue) return "";
         TimeSpan diff = resetTime.Value - DateTimeOffset.Now;
         string localStr = resetTime.Value.ToLocalTime().ToString("M月d日 HH:mm");
-        if (diff.TotalSeconds <= 0) return $"已到重置时间 ({localStr})";
+        if (diff.TotalSeconds <= 0) return $"已重置，请运行 agy 同步 ({localStr})";
         if (diff.TotalDays >= 1) return $"{(int)diff.TotalDays}天{diff.Hours}小时后 ({localStr})";
         if (diff.TotalHours >= 1) return $"{(int)diff.TotalHours}小时{diff.Minutes}分后 ({localStr})";
         return $"{Math.Max(0, diff.Minutes)}分钟后 ({localStr})";
