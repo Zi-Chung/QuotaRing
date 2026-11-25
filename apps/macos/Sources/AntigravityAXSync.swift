@@ -558,9 +558,8 @@ final class AntigravityAXSync {
             "resets in ", "reset in ",
             "resets at ", "refreshes at "
         ]
-        let lower = text.lowercased()
         for m in markers {
-            if let range = lower.range(of: m) {
+            if let range = text.range(of: m, options: [.caseInsensitive]) {
                 let tail = String(text[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
                 return tail
             }
