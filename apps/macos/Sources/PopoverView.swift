@@ -359,7 +359,7 @@ struct PopoverView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     } else {
-                        Text(cd.isEmpty ? "重置时间未知" : "剩余 \(cd)")
+                        Text(cd.isEmpty ? (bucket.percent >= 100 ? "满额未使用" : "重置时间未知") : "剩余 \(cd)")
                             .font(.system(size: 10))
                             .monospacedDigit()
                             .foregroundStyle(.secondary)

@@ -151,15 +151,15 @@ final class AntigravityAXSync {
             )
         }
 
-        // Locate a non-minimized window displaying the Quota & Usage page
-        var matchedDump: AXWindowDump?
+        // Scan ALL non-minimized Antigravity windows and pick the highest-scoring real Quota Settings window
+        // (avoids accidentally matching a chat window that merely discusses quota strings in prose).
+        var bestCandidate: (dump: AXWindowDump, score: Int)?
         var scannedWindows = 0
         var minimizedWindows = 0
         var windowDiagParts: [String] = []
 
         for app in apps {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
-            // Enable Electron/Chromium AX tree exposure cleanly
             AXUIElementSetAttributeValue(axApp, "AXManualAccessibility" as CFString, kCFBooleanTrue)
 
             var windowsRef: CFTypeRef?
@@ -173,23 +173,24 @@ final class AntigravityAXSync {
                 }
                 scannedWindows += 1
                 var dump = dumpWindow(win)
-                // Electron WebView may need ~0.35s after AXManualAccessibility=true to populate DOM children
                 if dump.texts.count < 8 {
                     Thread.sleep(forTimeInterval: 0.35)
                     dump = dumpWindow(win)
                 }
-                if looksLikeQuotaPage(dump.texts) {
-                    matchedDump = dump
-                    break
+                let score = scoreQuotaWindow(dump)
+                let parsedPreview = parseQuotaBuckets(from: dump.texts)
+                windowDiagParts.append("win(title=\(dump.windowTitle), score=\(score), parsed=\(parsedPreview.count), nodes=\(dump.nodesVisited), btns=\(dump.buttons.count))")
+
+                if score > 0 && parsedPreview.count >= 2 {
+                    if bestCandidate == nil || score > bestCandidate!.score {
+                        bestCandidate = (dump, score)
+                    }
                 }
-                let sample = dump.texts.suffix(12).joined(separator: " | ")
-                windowDiagParts.append("win(title=\(dump.windowTitle), nodes=\(dump.nodesVisited), texts=\(dump.texts.count), btns=\(dump.buttons.count), tail=[\(sample)])")
             }
-            if matchedDump != nil { break }
         }
 
-        guard let initialDump = matchedDump else {
-            let minHint = minimizedWindows > 0 ? "（检测到 \(minimizedWindows) 个最小化窗口，请取消最小化）" : "（请单独打开额度页窗口并保持未最小化）"
+        guard let initialDump = bestCandidate?.dump else {
+            let minHint = minimizedWindows > 0 ? "（检测到 \(minimizedWindows) 个最小化窗口，请取消最小化）" : "（请单独打开「设置 → 模型配额与用量」窗口并保持未最小化）"
             return AXSyncResult(
                 success: false,
                 message: "未找到「模型配额与用量」窗口\(minHint)",
@@ -248,13 +249,14 @@ final class AntigravityAXSync {
         let parsed = parseQuotaBuckets(from: finalDump.texts)
         let diagLines = finalDump.texts.prefix(80).joined(separator: " | ")
 
-        guard !parsed.isEmpty else {
+        // Require at least both Gemini weekly and Gemini 5h (or >= 2 parsed buckets) so partial reads never wipe existing rings
+        guard parsed.count >= 2 else {
             return AXSyncResult(
                 success: false,
-                message: "额度页已打开但未解析到有效百分比（保留上次读数）",
+                message: "额度页解析不完整（保留上次读数）",
                 bucketCount: 0,
                 syncedAt: nil,
-                diagnosticSummary: "clickedRefresh=\(clickedRefresh)\ntexts=\(diagLines)"
+                diagnosticSummary: "clickedRefresh=\(clickedRefresh), parsedCount=\(parsed.count)\ntexts=\(diagLines)"
             )
         }
 
@@ -359,31 +361,40 @@ final class AntigravityAXSync {
         return nil
     }
 
-    private func looksLikeQuotaPage(_ texts: [String]) -> Bool {
-        let joined = texts.joined(separator: "\n")
-        let lower = joined.lowercased()
+    private func scoreQuotaWindow(_ dump: AXWindowDump) -> Int {
+        var score = 0
+        let shortLines = dump.texts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.count <= 32 }
+        let shortLower = Set(shortLines.map { $0.lowercased() })
 
-        let strongMarkers = [
-            "模型配额与用量",
-            "模型配额",
-            "每周限额剩余",
-            "5 小时限额剩余",
-            "5小时限额剩余",
-            "model quota",
-            "models & quota",
-            "quota & usage",
-            "usage & quota",
-            "weekly limit remaining",
-            "5-hour limit remaining"
-        ]
-        if strongMarkers.contains(where: { lower.contains($0) }) {
+        // Strong exact standalone UI labels from Antigravity Settings -> Model Quota
+        if shortLower.contains("gemini 模型") || shortLower.contains("gemini models") { score += 40 }
+        if shortLower.contains("claude 与 gpt 模型") || shortLower.contains("claude and gpt models") || shortLower.contains("claude & gpt models") { score += 40 }
+        if shortLower.contains("每周限额剩余") || shortLower.contains("weekly limit remaining") { score += 35 }
+        if shortLower.contains("5 小时限额剩余") || shortLower.contains("5小时限额剩余") || shortLower.contains("5-hour limit remaining") { score += 35 }
+        if shortLower.contains("模型配额与用量") || shortLower.contains("model quota") || shortLower.contains("models & quota") { score += 25 }
+
+        // Standalone percentage tokens like "65%", "85%", "100%"
+        let exactPctCount = shortLines.filter { $0.range(of: #"^(?:100|[1-9]?\d)%$"#, options: .regularExpression) != nil }.count
+        if exactPctCount >= 2 { score += 20 }
+        if exactPctCount >= 4 { score += 20 }
+
+        if findRefreshButton(in: dump.buttons) != nil { score += 25 }
+
+        let titleLower = dump.windowTitle.lowercased()
+        if titleLower.contains("setting") || titleLower.contains("设置") { score += 20 }
+
+        // Must look genuinely like the quota page (at least 2 strong structural signals)
+        return score >= 70 ? score : 0
+    }
+
+    private func looksLikeQuotaPage(_ texts: [String]) -> Bool {
+        let shortLower = Set(texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { $0.count <= 32 })
+        if shortLower.contains("每周限额剩余") || shortLower.contains("5 小时限额剩余") || shortLower.contains("weekly limit remaining") || shortLower.contains("5-hour limit remaining") {
             return true
         }
-
-        let hasQuotaWord = lower.contains("配额") || lower.contains("限额") || lower.contains("quota") || lower.contains("用量")
-        let hasWindowWord = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower.contains("每周") || lower.contains("本周") || lower.contains("weekly")
-        let hasModelWord = lower.contains("gemini") || lower.contains("claude") || lower.contains("gpt")
-        return hasQuotaWord && hasWindowWord && hasModelWord
+        return shortLower.contains("模型配额与用量") || shortLower.contains("model quota") || shortLower.contains("models & quota")
     }
 
     private func findRefreshButton(in buttons: [AXButtonCandidate]) -> AXButtonCandidate? {
@@ -418,7 +429,7 @@ final class AntigravityAXSync {
         var expectingResetDuration = false
         var found: [String: ParsedBucket] = [:]
 
-        let pctRegex = try? NSRegularExpression(pattern: #"(?:^|[^\d.])(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*%"#)
+        let exactPctRegex = try? NSRegularExpression(pattern: #"^\s*(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*%\s*$"#)
 
         func bucketId(pool: Pool, window: WindowKind) -> String? {
             switch (pool, window) {
@@ -435,38 +446,44 @@ final class AntigravityAXSync {
             if line.isEmpty { continue }
             let lower = line.lowercased()
 
-            // Detect model pool headers
-            let isThirdPartyHeader =
-                lower.contains("claude") ||
-                lower.contains("gpt") ||
-                lower.contains("anthropic") ||
-                lower.contains("第三方") ||
-                lower.contains("其他模型") ||
-                lower.contains("3p") ||
-                lower.contains("third-party") ||
-                lower.contains("other models") ||
-                lower.contains("partner")
-            let isGeminiHeader = lower.contains("gemini") && !isThirdPartyHeader
+            // Detect model pool headers ONLY on concise standalone header nodes (<= 32 chars)
+            // so conversational prose in other UI regions can never hijack state.
+            if line.count <= 32 {
+                let isThirdPartyHeader =
+                    lower == "claude 与 gpt 模型" ||
+                    lower == "claude and gpt models" ||
+                    lower == "claude & gpt models" ||
+                    ((lower.contains("claude") || lower.contains("gpt") || lower.contains("第三方") || lower.contains("third-party") || lower.contains("other models")) && !lower.contains("%"))
+                let isGeminiHeader =
+                    (lower == "gemini 模型" || lower == "gemini models" || (lower.contains("gemini") && (lower.contains("模型") || lower.contains("model")))) && !isThirdPartyHeader
 
-            if isThirdPartyHeader {
-                currentPool = .thirdParty
-                currentWindow = .none
-                pendingReset = nil
-                expectingResetDuration = false
-            } else if isGeminiHeader {
-                currentPool = .gemini
-                currentWindow = .none
-                pendingReset = nil
-                expectingResetDuration = false
-            }
+                if isThirdPartyHeader {
+                    currentPool = .thirdParty
+                    currentWindow = .none
+                    pendingReset = nil
+                    expectingResetDuration = false
+                    continue
+                } else if isGeminiHeader {
+                    currentPool = .gemini
+                    currentWindow = .none
+                    pendingReset = nil
+                    expectingResetDuration = false
+                    continue
+                }
 
-            // Detect window headers (5h vs weekly)
-            let isDescSentence = lower.contains("您已使用") || lower.contains("完全刷新") || lower.contains("you have used") || lower.contains("will refresh") || lower.contains("resets in") || lower.contains("refreshes in")
-            if !isDescSentence {
-                let is5hHeader = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower == "5h"
-                let isWeeklyHeader = lower.contains("每周") || lower.contains("本周") || lower.contains("周额度") || lower.contains("周限额") || lower.contains("weekly") || lower.contains("7 天") || lower.contains("7天")
+                let is5hHeader =
+                    lower == "5 小时限额剩余" ||
+                    lower == "5小时限额剩余" ||
+                    lower == "5-hour limit remaining" ||
+                    lower == "5 hour limit remaining" ||
+                    lower == "5 小时额度"
+                let isWeeklyHeader =
+                    lower == "每周限额剩余" ||
+                    lower == "本周限额剩余" ||
+                    lower == "weekly limit remaining" ||
+                    lower == "周额度"
 
-                if is5hHeader && !expectingResetDuration {
+                if is5hHeader {
                     if currentPool == .gemini && found["gemini-5h"] != nil {
                         currentPool = .thirdParty
                     } else if currentPool == .none {
@@ -475,7 +492,8 @@ final class AntigravityAXSync {
                     currentWindow = .fiveHour
                     pendingReset = nil
                     expectingResetDuration = false
-                } else if isWeeklyHeader && !expectingResetDuration {
+                    continue
+                } else if isWeeklyHeader {
                     if currentPool == .gemini && found["gemini-weekly"] != nil {
                         currentPool = .thirdParty
                     } else if currentPool == .none {
@@ -484,45 +502,42 @@ final class AntigravityAXSync {
                     currentWindow = .weekly
                     pendingReset = nil
                     expectingResetDuration = false
+                    continue
                 }
             }
 
             guard let bId = bucketId(pool: currentPool, window: currentWindow) else { continue }
 
-            // Extract reset duration / timestamp cleanly:
-            // 1. If the line has a refresh/reset marker, parse ONLY the substring AFTER the marker/colon
-            //    so we never accidentally match "5 小时" inside "部分 5 小时限额".
-            // 2. If nothing follows the marker on this node (Chromium split the duration into the next node),
-            //    arm `expectingResetDuration = true` to capture the very next duration node (e.g. "2 小时，34 分钟").
-            if let afterMarker = extractTextAfterResetMarker(from: line) {
+            // Extract reset duration / timestamp cleanly from the description sentence (<= 110 chars)
+            // or from the immediately following duration node when Chromium splits after the colon.
+            if line.count <= 110, let afterMarker = extractTextAfterResetMarker(from: line) {
                 if let resetIso = parseDurationOrTimestampISO(from: afterMarker) {
                     applyReset(resetIso, to: bId, found: &found, pendingReset: &pendingReset)
                     expectingResetDuration = false
                 } else {
                     expectingResetDuration = true
                 }
-            } else if expectingResetDuration {
+                continue
+            } else if expectingResetDuration && line.count <= 32 {
                 if let resetIso = parseDurationOrTimestampISO(from: line) {
                     applyReset(resetIso, to: bId, found: &found, pendingReset: &pendingReset)
                     expectingResetDuration = false
+                    continue
                 } else if line.contains("%") {
                     expectingResetDuration = false
                 }
             }
 
-            // Try to extract an explicit percentage (including real "0%")
-            if let regex = pctRegex {
+            // Extract ONLY standalone percentage tokens (e.g. "65%", "85%", "100%", "0%") — never prose numbers!
+            if line.count <= 12, let regex = exactPctRegex {
                 let ns = line as NSString
                 if let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)),
                    match.numberOfRanges > 1 {
                     let numStr = ns.substring(with: match.range(at: 1))
                     if let val = Double(numStr), val >= 0.0 && val <= 100.0 {
-                        let isUsed = (lower.contains("已用") || lower.contains("已使用") || lower.contains("used"))
-                            && !(lower.contains("剩余") || lower.contains("remaining") || lower.contains("left"))
-                        let remaining = isUsed ? max(0.0, min(100.0, 100.0 - val)) : val
                         let resetIso = pendingReset ?? found[bId]?.resetTime
                         if found[bId] == nil {
-                            found[bId] = ParsedBucket(id: bId, percent: remaining, resetTime: resetIso)
+                            found[bId] = ParsedBucket(id: bId, percent: val, resetTime: resetIso)
                         }
                         pendingReset = nil
                         expectingResetDuration = false
