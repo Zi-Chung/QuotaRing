@@ -18,7 +18,7 @@ Most AI quota monitors extract OAuth tokens, decrypt browser cookies via OS Keyc
   - **Inner Ring** — Time remaining until quota reset
   - **`5` / `W` / `M` Rings** — Ultra-compact `5 [◎]  W [◎]` or `M [◎]` (5-hour, weekly, monthly, or custom cycles) in the macOS menu bar, or crisp high-DPI dual-ring in the Windows system tray.
 - **Multi-Provider Support**:
-  - **Antigravity**: Synced via the official `agy` CLI `statusLine` hook (bundled cross-platform MCP App plugin included).
+  - **Antigravity**: Synced via the official `agy` CLI `statusLine` hook (bundled cross-platform MCP App plugin included), plus an **opt-in macOS Accessibility background sync** (default OFF) that clicks the official Refresh button on a background non-minimized Antigravity Quota window without stealing focus or touching any credentials.
   - **OpenAI Codex**: Automatically reads local session logs under `~/.codex/sessions/**/*.jsonl` (`rate_limits`).
   - **Open Provider Slots**: Add or edit custom providers (Cursor, GrokBot, Claude, ...) directly inside the UI or drop any `*.json` file into `~/.config/quota-bar/providers/` — instant updates via kernel file watchers (`kqueue` / `FileSystemWatcher`).
 - **2-Key Global Summon (`⌥Q` / `Alt+Q`)**: Even if the macOS notch or Windows tray overflow hides the icon, press **`⌥Q`** (macOS) or **`Alt+Q`** (Windows) anytime to pop up the quota card immediately — no macOS Accessibility permission required.

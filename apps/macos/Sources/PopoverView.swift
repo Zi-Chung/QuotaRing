@@ -13,6 +13,14 @@ final class QuotaViewModel: ObservableObject {
     @Published var isRefreshing: Bool = false
     @Published var copiedToast: Bool = false
 
+    // Optional macOS Accessibility background sync for Antigravity Quota page (opt-in, default off)
+    @Published var axSyncEnabled: Bool = false
+    @Published var axSyncInterval: TimeInterval = 300.0
+    @Published var axTrusted: Bool = false
+    @Published var axIsSyncing: Bool = false
+    @Published var axStatusMessage: String = ""
+    @Published var axLastDiagnostic: String = ""
+
     var onRefresh: (() -> Void)?
     var onProviderChanged: ((String) -> Void)?
     var onFormatChanged: ((DisplayFormat) -> Void)?
@@ -22,6 +30,11 @@ final class QuotaViewModel: ObservableObject {
     var onOpenSlotsFolder: (() -> Void)?
     var onCopyAgyCommand: (() -> Void)?
     var onLaunchAgySync: (() -> Void)?
+    var onAXSyncEnabledChanged: ((Bool) -> Void)?
+    var onAXSyncIntervalChanged: ((TimeInterval) -> Void)?
+    var onAXSyncNow: (() -> Void)?
+    var onRequestAXPermission: (() -> Void)?
+    var onCopyAXDiagnostic: (() -> Void)?
     var onSaveSlot: ((EditableSlotDraft) -> Void)?
     var onDeleteSlot: ((String) -> Void)?
     var onQuit: (() -> Void)?
@@ -700,6 +713,95 @@ struct PopoverView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
+
+            Divider().opacity(0.45)
+
+            // Optional Antigravity Background Page Sync (Accessibility, Opt-in)
+            VStack(alignment: .leading, spacing: 7) {
+                Toggle(isOn: Binding(
+                    get: { vm.axSyncEnabled },
+                    set: { vm.onAXSyncEnabledChanged?($0) }
+                )) {
+                    HStack(spacing: 4) {
+                        Text("Antigravity 页面自动同步")
+                            .font(.system(size: 11.5, weight: .medium))
+                        Text("实验性")
+                            .font(.system(size: 9))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.16))
+                            .foregroundStyle(.orange)
+                            .clipShape(Capsule())
+                    }
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+
+                if vm.axSyncEnabled {
+                    HStack(spacing: 6) {
+                        Text(vm.axTrusted ? "辅助功能：已授权 ✓" : "辅助功能：未授权")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(vm.axTrusted ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange))
+                        Spacer()
+                        if !vm.axTrusted {
+                            Button("前往授权") {
+                                vm.onRequestAXPermission?()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.mini)
+                        } else {
+                            Button(vm.axIsSyncing ? "读取中..." : "立即同步") {
+                                vm.onAXSyncNow?()
+                            }
+                            .disabled(vm.axIsSyncing)
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                        }
+                    }
+
+                    HStack {
+                        Text("自动间隔")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { vm.axSyncInterval },
+                            set: { vm.onAXSyncIntervalChanged?($0) }
+                        )) {
+                            Text("5分钟").tag(300.0)
+                            Text("10分钟").tag(600.0)
+                            Text("15分钟").tag(900.0)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 165)
+                        .controlSize(.small)
+                    }
+
+                    if !vm.axStatusMessage.isEmpty {
+                        HStack(spacing: 6) {
+                            Text(vm.axStatusMessage)
+                                .font(.system(size: 10))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                            Spacer()
+                            if !vm.axLastDiagnostic.isEmpty {
+                                Button("诊断") {
+                                    vm.onCopyAXDiagnostic?()
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(Color.accentColor)
+                                .help("复制 AX 解析诊断信息到剪贴板")
+                            }
+                        }
+                    }
+
+                    Text("需保持一个 Antigravity 窗口停在「设置 → 模型配额与用量」且未最小化；登录凭证始终留在官方应用内。")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(.tertiary)
+                }
+            }
         }
         .padding(11)
         .background(Color.accentColor.opacity(0.06))

@@ -226,6 +226,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
            let preset = HotKeyPreset(rawValue: savedHotKey) {
             viewModel.hotKeyPreset = preset
         }
+        viewModel.axSyncEnabled = UserDefaults.standard.bool(forKey: "QuotaRing.AXSyncEnabled")
+        if let savedAXInterval = UserDefaults.standard.value(forKey: "QuotaRing.AXSyncInterval") as? Double,
+           savedAXInterval >= 300.0 {
+            viewModel.axSyncInterval = savedAXInterval
+        }
+        viewModel.axTrusted = AntigravityAXSync.isAccessibilityTrusted(prompt: false)
         viewModel.launchAtLogin = isLaunchAtLoginEnabled()
 
         bindViewModelCallbacks()
@@ -271,8 +277,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         refreshWatchedDirectories()
 
+        // Configure optional Antigravity Accessibility sync (only active if user explicitly enabled it)
+        configureAXSync()
+
         fetchData()
         startTimer()
+    }
+
+    private func configureAXSync() {
+        viewModel.axTrusted = AntigravityAXSync.isAccessibilityTrusted(prompt: false)
+        AntigravityAXSync.shared.configure(
+            enabled: viewModel.axSyncEnabled,
+            intervalSeconds: viewModel.axSyncInterval
+        ) { [weak self] result in
+            guard let self = self else { return }
+            self.viewModel.axIsSyncing = false
+            self.viewModel.axTrusted = AntigravityAXSync.isAccessibilityTrusted(prompt: false)
+            self.viewModel.axStatusMessage = result.message
+            self.viewModel.axLastDiagnostic = result.diagnosticSummary
+            if result.success {
+                self.fetchData()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -440,7 +466,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.copyAgyCommand()
         }
         viewModel.onLaunchAgySync = { [weak self] in
-            self?.launchAgyInTerminal()
+            guard let self = self else { return }
+            if self.viewModel.axSyncEnabled && AntigravityAXSync.isAccessibilityTrusted(prompt: false) {
+                self.viewModel.axIsSyncing = true
+                AntigravityAXSync.shared.syncNow(manual: true)
+            } else {
+                self.launchAgyInTerminal()
+            }
+        }
+        viewModel.onAXSyncEnabledChanged = { [weak self] enabled in
+            guard let self = self else { return }
+            self.viewModel.axSyncEnabled = enabled
+            UserDefaults.standard.setValue(enabled, forKey: "QuotaRing.AXSyncEnabled")
+            self.viewModel.axTrusted = AntigravityAXSync.isAccessibilityTrusted(prompt: false)
+            if !enabled {
+                self.viewModel.axStatusMessage = ""
+            }
+            self.configureAXSync()
+        }
+        viewModel.onAXSyncIntervalChanged = { [weak self] secs in
+            guard let self = self else { return }
+            let clamped = max(300.0, secs)
+            self.viewModel.axSyncInterval = clamped
+            UserDefaults.standard.setValue(clamped, forKey: "QuotaRing.AXSyncInterval")
+            self.configureAXSync()
+        }
+        viewModel.onAXSyncNow = { [weak self] in
+            guard let self = self else { return }
+            self.viewModel.axIsSyncing = true
+            self.viewModel.axStatusMessage = "正在后台刷新并读取额度页..."
+            AntigravityAXSync.shared.syncNow(manual: true)
+        }
+        viewModel.onRequestAXPermission = { [weak self] in
+            self?.closeAllPanels()
+            AntigravityAXSync.openAccessibilitySettings()
+        }
+        viewModel.onCopyAXDiagnostic = { [weak self] in
+            guard let diag = self?.viewModel.axLastDiagnostic, !diag.isEmpty else { return }
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(diag, forType: .string)
+            self?.viewModel.axStatusMessage = "已复制诊断信息到剪贴板"
         }
         viewModel.onSaveSlot = { [weak self] draft in
             QuotaFetcher.shared.saveOpenSlot(draft)
@@ -474,6 +540,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func fetchData() {
+        viewModel.axTrusted = AntigravityAXSync.isAccessibilityTrusted(prompt: false)
         guard !isFetching else { return }
         isFetching = true
         viewModel.isRefreshing = true

@@ -140,6 +140,11 @@ class QuotaFetcher {
             .appendingPathComponent(".gemini/antigravity-cli/quota-snapshot.json")
     }()
 
+    let agyAXSnapshotURL: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/quota-bar/antigravity-ax-snapshot.json")
+    }()
+
     let codexSessionsDir: URL = {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/sessions")
@@ -217,15 +222,45 @@ class QuotaFetcher {
         }
     }
 
-    // MARK: 1. Antigravity Official CLI Snapshot
+    // MARK: 1. Antigravity Official CLI Snapshot & Optional AX UI Snapshot (Newest Wins)
 
-    private func loadAntigravity() -> ProviderQuota? {
-        guard FileManager.default.fileExists(atPath: agySnapshotURL.path),
-              let data = try? Data(contentsOf: agySnapshotURL),
+    private func decodeAgySnapshot(at url: URL) -> (snap: AgySnapshotFile, updatedAt: Date)? {
+        guard FileManager.default.fileExists(atPath: url.path),
+              let data = try? Data(contentsOf: url),
               let snap = try? JSONDecoder().decode(AgySnapshotFile.self, from: data),
               let buckets = snap.buckets, !buckets.isEmpty else {
             return nil
         }
+        let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+        let dt = parseISO8601(snap.updatedAt) ?? mtime
+        return (snap, dt)
+    }
+
+    private func loadAntigravity() -> ProviderQuota? {
+        let cliLoaded = decodeAgySnapshot(at: agySnapshotURL)
+        let axLoaded = decodeAgySnapshot(at: agyAXSnapshotURL)
+
+        let chosen: (snap: AgySnapshotFile, updatedAt: Date, sourceLabel: String)?
+        switch (cliLoaded, axLoaded) {
+        case let (c?, a?):
+            if a.updatedAt > c.updatedAt {
+                chosen = (a.snap, a.updatedAt, "后台额度页自动同步")
+            } else {
+                chosen = (c.snap, c.updatedAt, "官方 agy CLI 快照")
+            }
+        case let (c?, nil):
+            chosen = (c.snap, c.updatedAt, "官方 agy CLI 快照")
+        case let (nil, a?):
+            chosen = (a.snap, a.updatedAt, "后台额度页自动同步")
+        case (nil, nil):
+            chosen = nil
+        }
+
+        guard let selected = chosen, let buckets = selected.snap.buckets, !buckets.isEmpty else {
+            return nil
+        }
+        let snap = selected.snap
+        let fallbackPlanTier = snap.planTier ?? cliLoaded?.snap.planTier
 
         var fiveHour: QuotaWindow?
         var weekly: QuotaWindow?
@@ -291,10 +326,10 @@ class QuotaFetcher {
             name: "Antigravity",
             shortBadge: "A",
             symbolName: "sparkles",
-            sourceLabel: "官方 agy CLI 快照",
+            sourceLabel: selected.sourceLabel,
             isOpenSlot: false,
-            planTier: snap.planTier,
-            syncedAt: parseISO8601(snap.updatedAt),
+            planTier: fallbackPlanTier,
+            syncedAt: selected.updatedAt,
             fiveHour: fiveHour,
             weekly: weekly,
             monthly: nil,
@@ -566,6 +601,7 @@ class QuotaFetcher {
     func directoriesToWatch() -> [URL] {
         var dirs: [URL] = [
             agySnapshotURL.deletingLastPathComponent(),
+            agyAXSnapshotURL.deletingLastPathComponent(),
             openSlotsDir
         ]
 
