@@ -457,4 +457,55 @@ public sealed class QuotaFetcher
 
         return list;
     }
+
+    public void SaveOpenSlot(
+        string id,
+        string name,
+        string shortBadge,
+        string planTier,
+        string windowKind,
+        double remainingPercent,
+        DateTimeOffset resetDate)
+    {
+        string cleanId = new string(id.ToLowerInvariant().Where(c => char.IsLetterOrDigit(c) || c == '-' || c == '_').ToArray());
+        if (string.IsNullOrEmpty(cleanId)) cleanId = "custom";
+        string finalName = string.IsNullOrWhiteSpace(name) ? cleanId : name.Trim();
+        string finalBadge = string.IsNullOrWhiteSpace(shortBadge)
+            ? finalName[..Math.Min(2, finalName.Length)].ToUpperInvariant()
+            : shortBadge[..Math.Min(2, shortBadge.Length)].ToUpperInvariant();
+
+        (string winKey, string winLabel, int winMins) = windowKind switch
+        {
+            "5h" => ("fiveHour", "5 小时额度", 300),
+            "weekly" => ("weekly", "周额度", 10080),
+            _ => ("monthly", "月额度", 43200)
+        };
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["id"] = cleanId,
+            ["name"] = finalName,
+            ["shortBadge"] = finalBadge,
+            ["updatedAt"] = DateTimeOffset.UtcNow.ToString("O"),
+            [winKey] = new Dictionary<string, object>
+            {
+                ["label"] = winLabel,
+                ["remainingPercent"] = Math.Round(Math.Clamp(remainingPercent, 0.0, 100.0), 1),
+                ["resetTime"] = resetDate.ToUniversalTime().ToString("O"),
+                ["windowMinutes"] = winMins
+            }
+        };
+        if (!string.IsNullOrWhiteSpace(planTier))
+            payload["planTier"] = planTier.Trim();
+
+        try
+        {
+            Directory.CreateDirectory(OpenSlotsDir);
+            string dest = Path.Combine(OpenSlotsDir, $"{cleanId}.json");
+            string tmp = Path.Combine(OpenSlotsDir, $".{cleanId}.json.tmp");
+            File.WriteAllText(tmp, JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, dest, overwrite: true);
+        }
+        catch { /* ignore */ }
+    }
 }

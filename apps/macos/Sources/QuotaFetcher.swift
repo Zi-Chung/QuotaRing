@@ -32,12 +32,23 @@ struct ProviderQuota {
     let shortBadge: String     // "A", "C", "Cu", "G", ...
     let symbolName: String     // SF Symbol name for menu header
     let sourceLabel: String    // "官方 agy CLI 快照", "本地 ~/.codex 会话日志", "开放插槽"
+    let isOpenSlot: Bool
     var planTier: String?
     var syncedAt: Date?
     var fiveHour: QuotaWindow?
     var weekly: QuotaWindow?
     var monthly: QuotaWindow?
     var groups: [ModelGroupInfo]
+}
+
+struct EditableSlotDraft {
+    var id: String = "cursor"
+    var name: String = "Cursor"
+    var shortBadge: String = "Cu"
+    var planTier: String = "Pro"
+    var windowKind: String = "monthly" // "5h", "weekly", "monthly"
+    var remainingPercent: Double = 80
+    var resetDate: Date = Date().addingTimeInterval(30 * 24 * 3600)
 }
 
 struct MultiQuotaSnapshot {
@@ -281,6 +292,7 @@ class QuotaFetcher {
             shortBadge: "A",
             symbolName: "sparkles",
             sourceLabel: "官方 agy CLI 快照",
+            isOpenSlot: false,
             planTier: snap.planTier,
             syncedAt: parseISO8601(snap.updatedAt),
             fiveHour: fiveHour,
@@ -395,6 +407,7 @@ class QuotaFetcher {
                 shortBadge: "C",
                 symbolName: "terminal",
                 sourceLabel: "本地 ~/.codex 会话日志",
+                isOpenSlot: false,
                 planTier: tierLabel,
                 syncedAt: eventTime,
                 fiveHour: fiveHour,
@@ -535,6 +548,7 @@ class QuotaFetcher {
                 shortBadge: badge,
                 symbolName: symbol,
                 sourceLabel: "开放插槽 (\(fileURL.lastPathComponent))",
+                isOpenSlot: true,
                 planTier: slot.planTier,
                 syncedAt: syncedAt,
                 fiveHour: fiveHour,
@@ -545,5 +559,95 @@ class QuotaFetcher {
         }
 
         return results
+    }
+
+    // MARK: 4. Watch Directories & Open Slot Persistence
+
+    func directoriesToWatch() -> [URL] {
+        var dirs: [URL] = [
+            agySnapshotURL.deletingLastPathComponent(),
+            openSlotsDir
+        ]
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: codexSessionsDir.path) {
+            dirs.append(codexSessionsDir)
+            let cal = Calendar.current
+            let comps = cal.dateComponents([.year, .month, .day], from: Date())
+            if let y = comps.year, let m = comps.month, let d = comps.day {
+                let todayDir = codexSessionsDir
+                    .appendingPathComponent(String(format: "%04d", y))
+                    .appendingPathComponent(String(format: "%02d", m))
+                    .appendingPathComponent(String(format: "%02d", d))
+                let monthDir = todayDir.deletingLastPathComponent()
+                if fm.fileExists(atPath: monthDir.path) { dirs.append(monthDir) }
+                if fm.fileExists(atPath: todayDir.path) { dirs.append(todayDir) }
+            }
+        }
+        return dirs
+    }
+
+    func saveOpenSlot(_ draft: EditableSlotDraft) {
+        let cleanedId = draft.id
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "[^a-z0-9_-]", with: "-", options: .regularExpression)
+        let finalId = cleanedId.isEmpty ? "custom" : cleanedId
+        let finalName = draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? finalId.capitalized : draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalBadge = String((draft.shortBadge.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? String(finalName.prefix(2)) : draft.shortBadge).prefix(2))
+
+        let windowKey: String
+        let windowLabel: String
+        let windowMinutes: Int
+        switch draft.windowKind {
+        case "5h":
+            windowKey = "fiveHour"
+            windowLabel = "5 小时额度"
+            windowMinutes = 300
+        case "weekly":
+            windowKey = "weekly"
+            windowLabel = "周额度"
+            windowMinutes = 10080
+        default:
+            windowKey = "monthly"
+            windowLabel = "月额度"
+            windowMinutes = 43200
+        }
+
+        var payload: [String: Any] = [
+            "id": finalId,
+            "name": finalName,
+            "shortBadge": finalBadge,
+            "updatedAt": toISO8601(Date()),
+            windowKey: [
+                "label": windowLabel,
+                "remainingPercent": round(max(0.0, min(100.0, draft.remainingPercent)) * 10.0) / 10.0,
+                "resetTime": toISO8601(draft.resetDate),
+                "windowMinutes": windowMinutes
+            ]
+        ]
+        let tier = draft.planTier.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tier.isEmpty {
+            payload["planTier"] = tier
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: openSlotsDir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            let dest = openSlotsDir.appendingPathComponent("\(finalId).json")
+            let tmp = openSlotsDir.appendingPathComponent(".\(finalId).json.tmp")
+            try data.write(to: tmp, options: .atomic)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(at: tmp, to: dest)
+        } catch {
+            // Ignore write errors
+        }
+    }
+
+    func deleteOpenSlot(id: String) {
+        let dest = openSlotsDir.appendingPathComponent("\(id).json")
+        try? FileManager.default.removeItem(at: dest)
     }
 }

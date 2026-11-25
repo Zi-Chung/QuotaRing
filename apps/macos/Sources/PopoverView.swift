@@ -22,6 +22,8 @@ final class QuotaViewModel: ObservableObject {
     var onOpenSlotsFolder: (() -> Void)?
     var onCopyAgyCommand: (() -> Void)?
     var onLaunchAgySync: (() -> Void)?
+    var onSaveSlot: ((EditableSlotDraft) -> Void)?
+    var onDeleteSlot: ((String) -> Void)?
     var onQuit: (() -> Void)?
 }
 
@@ -77,6 +79,9 @@ struct ColoredDualRingView: View {
 struct PopoverView: View {
     @ObservedObject var vm: QuotaViewModel
     @State private var showSettings = false
+    @State private var showSlotEditor = false
+    @State private var editingExistingSlot = false
+    @State private var slotDraft = EditableSlotDraft()
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1.0)) { context in
@@ -91,6 +96,10 @@ struct PopoverView: View {
                             settingsPanel
                         }
 
+                        if showSlotEditor {
+                            slotEditorPanel
+                        }
+
                         let providers = vm.snapshot?.providers ?? []
                         if providers.isEmpty {
                             emptyStateCard
@@ -100,18 +109,16 @@ struct PopoverView: View {
                             }
                         }
 
-                        if !providers.contains(where: { $0.id != "antigravity" && $0.id != "codex" }) {
-                            openSlotHintCard
-                        }
+                        openSlotHintCard
                     }
                     .padding(12)
                 }
-                .frame(maxHeight: 440)
+                .frame(maxHeight: 460)
 
                 Divider().opacity(0.5)
                 footerBar
             }
-            .frame(width: 340)
+            .frame(width: 344)
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.35))
         }
     }
@@ -224,6 +231,21 @@ struct PopoverView: View {
 
                 Spacer()
 
+                if provider.isOpenSlot {
+                    Button(action: {
+                        startEditing(provider)
+                    }) {
+                        Image(systemName: "pencil")
+                            .font(.system(size: 10, weight: .medium))
+                            .frame(width: 21, height: 21)
+                            .background(Color.primary.opacity(0.06))
+                            .foregroundStyle(.secondary)
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("编辑此开放插槽")
+                }
+
                 Button(action: {
                     let next = isPinned ? "all" : provider.id
                     vm.onProviderChanged?(next)
@@ -251,7 +273,7 @@ struct PopoverView: View {
                     }
 
                     ForEach(group.buckets, id: \.id) { bucket in
-                        bucketRow(bucket, now: now)
+                        bucketRow(bucket, providerId: provider.id, now: now)
                     }
                 }
             }
@@ -273,7 +295,7 @@ struct PopoverView: View {
         }
     }
 
-    private func bucketRow(_ bucket: ModelBucketInfo, now: Date) -> some View {
+    private func bucketRow(_ bucket: ModelBucketInfo, providerId: String, now: Date) -> some View {
         let winSecs: TimeInterval = bucket.windowSeconds > 0
             ? bucket.windowSeconds
             : defaultWindowSeconds(for: bucket.window)
@@ -288,14 +310,28 @@ struct PopoverView: View {
                 .opacity(expired ? 0.45 : 1.0)
 
             VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline) {
+                HStack(alignment: .center, spacing: 6) {
                     Text(bucket.displayName)
                         .font(.system(size: 11.5, weight: .medium))
                     Spacer()
                     if expired {
-                        Text("已重置")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                        if providerId == "antigravity" {
+                            Button(action: { vm.onLaunchAgySync?() }) {
+                                Label("同步", systemImage: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2.5)
+                                    .background(Color.accentColor.opacity(0.16))
+                                    .foregroundStyle(Color.accentColor)
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("打开终端运行 agy 刷新新一轮配额")
+                        } else {
+                            Text("已重置")
+                                .font(.system(size: 11.5, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text("\(bucket.percent)%")
                             .font(.system(size: 13, weight: .bold, design: .rounded))
@@ -306,7 +342,7 @@ struct PopoverView: View {
 
                 HStack {
                     if expired {
-                        Text("上轮 \(bucket.percent)% · 点底部同步新周期")
+                        Text("已重置 · 上轮 \(bucket.percent)%")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     } else {
@@ -364,15 +400,21 @@ struct PopoverView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("开放插槽（Cursor / GrokBot 等）")
                     .font(.system(size: 11, weight: .medium))
-                Text("放入 ~/.config/quota-bar/providers/*.json 自动接入")
+                Text("可视化添加或放入 providers/*.json 自动监听")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
             }
             Spacer()
-            Button("打开目录") {
-                vm.onOpenSlotsFolder?()
+            Button(showSlotEditor ? "收起" : "+ 添加") {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    if !showSlotEditor {
+                        editingExistingSlot = false
+                        slotDraft = EditableSlotDraft()
+                    }
+                    showSlotEditor.toggle()
+                }
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.borderedProminent)
             .controlSize(.mini)
         }
         .padding(.horizontal, 10)
@@ -384,6 +426,181 @@ struct PopoverView: View {
                 .foregroundStyle(Color.primary.opacity(0.12))
         )
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    // MARK: Visual Open-Slot Editor
+
+    private func startEditing(_ provider: ProviderQuota) {
+        let winKind: String
+        let pct: Double
+        let resetDate: Date
+        if let mo = provider.monthly {
+            winKind = "monthly"
+            pct = Double(mo.percent)
+            resetDate = parseISO8601Date(mo.resetTime) ?? Date().addingTimeInterval(30 * 24 * 3600)
+        } else if let wk = provider.weekly {
+            winKind = "weekly"
+            pct = Double(wk.percent)
+            resetDate = parseISO8601Date(wk.resetTime) ?? Date().addingTimeInterval(7 * 24 * 3600)
+        } else if let fh = provider.fiveHour {
+            winKind = "5h"
+            pct = Double(fh.percent)
+            resetDate = parseISO8601Date(fh.resetTime) ?? Date().addingTimeInterval(5 * 3600)
+        } else {
+            winKind = "monthly"
+            pct = 80
+            resetDate = Date().addingTimeInterval(30 * 24 * 3600)
+        }
+
+        slotDraft = EditableSlotDraft(
+            id: provider.id,
+            name: provider.name,
+            shortBadge: provider.shortBadge,
+            planTier: provider.planTier ?? "",
+            windowKind: winKind,
+            remainingPercent: pct,
+            resetDate: resetDate
+        )
+        editingExistingSlot = true
+        withAnimation(.easeInOut(duration: 0.16)) {
+            showSlotEditor = true
+        }
+    }
+
+    private func applySlotPreset(id: String, name: String, badge: String, tier: String, kind: String, offsetSeconds: TimeInterval) {
+        slotDraft.id = id
+        slotDraft.name = name
+        slotDraft.shortBadge = badge
+        slotDraft.planTier = tier
+        slotDraft.windowKind = kind
+        slotDraft.resetDate = Date().addingTimeInterval(offsetSeconds)
+    }
+
+    private var slotEditorPanel: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(editingExistingSlot ? "编辑开放插槽" : "添加开放插槽")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !editingExistingSlot {
+                    HStack(spacing: 4) {
+                        presetChip("Cursor") {
+                            applySlotPreset(id: "cursor", name: "Cursor", badge: "Cu", tier: "Pro", kind: "monthly", offsetSeconds: 30 * 24 * 3600)
+                        }
+                        presetChip("GrokBot") {
+                            applySlotPreset(id: "grokbot", name: "GrokBot", badge: "G", tier: "SuperGrok", kind: "5h", offsetSeconds: 5 * 3600)
+                        }
+                        presetChip("Claude") {
+                            applySlotPreset(id: "claude", name: "Claude", badge: "Cl", tier: "Pro", kind: "weekly", offsetSeconds: 7 * 24 * 3600)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                TextField("品牌名 (如 Cursor)", text: $slotDraft.name)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .onChange(of: slotDraft.name) { newVal in
+                        if !editingExistingSlot {
+                            let clean = newVal.lowercased().replacingOccurrences(of: "[^a-z0-9_-]", with: "", options: .regularExpression)
+                            if !clean.isEmpty { slotDraft.id = clean }
+                        }
+                    }
+                TextField("缩写", text: $slotDraft.shortBadge)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 46)
+                TextField("套餐", text: $slotDraft.planTier)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 72)
+            }
+
+            HStack {
+                Text("周期")
+                    .font(.system(size: 11))
+                Spacer()
+                Picker("", selection: $slotDraft.windowKind) {
+                    Text("5 小时").tag("5h")
+                    Text("周 (7天)").tag("weekly")
+                    Text("月 (30天)").tag("monthly")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 210)
+                .controlSize(.small)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text("剩余比例")
+                        .font(.system(size: 11))
+                    Spacer()
+                    Text("\(Int(round(slotDraft.remainingPercent)))%")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(percentColor(Int(round(slotDraft.remainingPercent))))
+                }
+                Slider(value: $slotDraft.remainingPercent, in: 0...100, step: 1)
+                    .controlSize(.small)
+            }
+
+            HStack {
+                Text("重置时间")
+                    .font(.system(size: 11))
+                Spacer()
+                DatePicker("", selection: $slotDraft.resetDate, displayedComponents: [.date, .hourAndMinute])
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
+
+            HStack(spacing: 8) {
+                if editingExistingSlot {
+                    Button("删除", role: .destructive) {
+                        vm.onDeleteSlot?(slotDraft.id)
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            showSlotEditor = false
+                        }
+                    }
+                    .controlSize(.small)
+                }
+                Spacer()
+                Button("取消") {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        showSlotEditor = false
+                    }
+                }
+                .controlSize(.small)
+
+                Button("保存") {
+                    vm.onSaveSlot?(slotDraft)
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        showSlotEditor = false
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .padding(11)
+        .background(Color.accentColor.opacity(0.06))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func presetChip(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(.system(size: 9.5, weight: .medium))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.primary.opacity(0.07))
+            .clipShape(Capsule())
+            .buttonStyle(.plain)
     }
 
     // MARK: Collapsible Settings Panel

@@ -21,6 +21,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _timer;
     private readonly GlobalHotKeyWindow _hotKeyWindow;
+    private readonly SnapshotWatcher _watcher;
     private readonly string _prefsPath;
     private UserPrefs _prefs;
     private MultiQuotaSnapshot? _latestSnapshot;
@@ -54,6 +55,9 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         _hotKeyWindow = new GlobalHotKeyWindow(SummonFromHotKey);
         _hotKeyWindow.RegisterPreset(_prefs.HotKeyPreset);
+
+        _watcher = new SnapshotWatcher(RefreshData);
+        _watcher.Start();
 
         _timer = new System.Windows.Forms.Timer { Interval = Math.Max(10, _prefs.RefreshSeconds) * 1000 };
         _timer.Tick += (_, _) => RefreshData();
@@ -314,6 +318,25 @@ public sealed class TrayApplicationContext : ApplicationContext
         refreshItem.Click += (_, _) => RefreshData();
         menu.Items.Add(refreshItem);
 
+        var editSlotItem = new ToolStripMenuItem("可视化添加/编辑开放插槽...");
+        editSlotItem.Click += (_, _) =>
+        {
+            using var dialog = new SlotEditorForm();
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                QuotaFetcher.Shared.SaveOpenSlot(
+                    dialog.SlotId,
+                    dialog.SlotName,
+                    dialog.SlotBadge,
+                    dialog.SlotTier,
+                    dialog.WindowKind,
+                    dialog.RemainingPercent,
+                    dialog.ResetDate);
+                RefreshData();
+            }
+        };
+        menu.Items.Add(editSlotItem);
+
         var openSlotsItem = new ToolStripMenuItem("打开开放插槽目录 (Cursor / GrokBot...)");
         openSlotsItem.Click += (_, _) =>
         {
@@ -373,6 +396,7 @@ public sealed class TrayApplicationContext : ApplicationContext
     {
         _timer.Stop();
         _timer.Dispose();
+        _watcher.Dispose();
         _hotKeyWindow.Dispose();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();

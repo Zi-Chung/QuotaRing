@@ -204,6 +204,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var popover: NSPopover!
     var floatingPanel: FloatingQuotaPanel?
     let viewModel = QuotaViewModel()
+    var fileWatcher: DirectoryWatcher?
     var timer: Timer?
     var eventMonitor: Any?
     var localKeyMonitor: Any?
@@ -264,11 +265,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register 2-key global hotkey (default: Option + Q)
         registerActiveHotKey()
 
+        // Start kernel kqueue file watcher for instant (~0.25s) updates
+        fileWatcher = DirectoryWatcher { [weak self] in
+            self?.fetchData()
+        }
+        refreshWatchedDirectories()
+
         fetchData()
         startTimer()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        fileWatcher?.stop()
         GlobalHotKeyManager.shared.unregister()
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -276,6 +284,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let monitor = localKeyMonitor {
             NSEvent.removeMonitor(monitor)
         }
+    }
+
+    private func refreshWatchedDirectories() {
+        fileWatcher?.start(directories: QuotaFetcher.shared.directoriesToWatch())
     }
 
     private func registerActiveHotKey() {
@@ -429,6 +441,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         viewModel.onLaunchAgySync = { [weak self] in
             self?.launchAgyInTerminal()
+        }
+        viewModel.onSaveSlot = { [weak self] draft in
+            QuotaFetcher.shared.saveOpenSlot(draft)
+            self?.fetchData()
+        }
+        viewModel.onDeleteSlot = { [weak self] id in
+            QuotaFetcher.shared.deleteOpenSlot(id: id)
+            self?.fetchData()
         }
         viewModel.onQuit = {
             NSApplication.shared.terminate(nil)

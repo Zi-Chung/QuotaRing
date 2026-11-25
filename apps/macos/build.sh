@@ -16,6 +16,7 @@ fi
 
 SOURCES=(
   "${SCRIPT_DIR}/Sources/QuotaFetcher.swift"
+  "${SCRIPT_DIR}/Sources/FileWatcher.swift"
   "${SCRIPT_DIR}/Sources/GlobalHotKey.swift"
   "${SCRIPT_DIR}/Sources/PopoverView.swift"
   "${SCRIPT_DIR}/Sources/AppDelegate.swift"

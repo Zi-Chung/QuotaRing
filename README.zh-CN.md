@@ -20,7 +20,7 @@
 - **多品牌统一查看**：
   - **Antigravity**：通过官方 `agy` CLI `statusLine` 钩子同步快照（内置跨平台 Antigravity 侧边栏插件）。
   - **OpenAI Codex**：纯本地自动解析 `~/.codex/sessions/**/*.jsonl` 中的最新 `rate_limits`。
-  - **开放插槽（Cursor / GrokBot / Claude 等）**：往 `~/.config/quota-bar/providers/` 放入任意 `*.json` 文件即可自动以同款双环展示。
+  - **开放插槽（Cursor / GrokBot / Claude 等）**：支持在面板内直接可视化添加/编辑，或放入 `~/.config/quota-bar/providers/*.json`，通过系统级文件监听（`kqueue` / `FileSystemWatcher`）0.1 秒内瞬时生效。
 - **双键全局唤起（`⌥Q` / `Alt+Q`）**：即使 MacBook 刘海或 Windows 托盘折叠把图标挡住，按 **`⌥Q`**（macOS）或 **`Alt+Q`**（Windows）随时在屏幕角落弹出配额卡片（可在设置中切 `⌃Q` / `⌥R` / `⌥1` / 关闭，无需申请辅助功能权限）。
 - **原生极致轻量**：
   - **macOS**：纯 Swift + AppKit 编写（约 1 MB，无 Electron，自动适配深/浅色菜单栏）。

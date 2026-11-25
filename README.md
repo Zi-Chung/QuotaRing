@@ -20,7 +20,7 @@ Most AI quota monitors extract OAuth tokens, decrypt browser cookies via OS Keyc
 - **Multi-Provider Support**:
   - **Antigravity**: Synced via the official `agy` CLI `statusLine` hook (bundled cross-platform MCP App plugin included).
   - **OpenAI Codex**: Automatically reads local session logs under `~/.codex/sessions/**/*.jsonl` (`rate_limits`).
-  - **Open Provider Slots**: Drop any `*.json` file into `~/.config/quota-bar/providers/` (e.g., `cursor.json`, `grokbot.json`, `claude.json`) to visualize any brand with the same dual-ring UI.
+  - **Open Provider Slots**: Add or edit custom providers (Cursor, GrokBot, Claude, ...) directly inside the UI or drop any `*.json` file into `~/.config/quota-bar/providers/` — instant updates via kernel file watchers (`kqueue` / `FileSystemWatcher`).
 - **2-Key Global Summon (`⌥Q` / `Alt+Q`)**: Even if the macOS notch or Windows tray overflow hides the icon, press **`⌥Q`** (macOS) or **`Alt+Q`** (Windows) anytime to pop up the quota card immediately — no macOS Accessibility permission required.
 - **Native & Ultra-Lightweight**:
   - **macOS**: Pure Swift + AppKit (`~1 MB`, zero Electron bloat, automatic Dark/Light template icon).
