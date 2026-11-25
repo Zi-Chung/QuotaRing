@@ -122,6 +122,8 @@ final class AntigravityAXSync {
 
     private struct AXWindowDump {
         let window: AXUIElement
+        let windowTitle: String
+        let nodesVisited: Int
         let texts: [String]
         let buttons: [AXButtonCandidate]
         let hasBusyIndicator: Bool
@@ -152,6 +154,8 @@ final class AntigravityAXSync {
         // Locate a non-minimized window displaying the Quota & Usage page
         var matchedDump: AXWindowDump?
         var scannedWindows = 0
+        var minimizedWindows = 0
+        var windowDiagParts: [String] = []
 
         for app in apps {
             let axApp = AXUIElementCreateApplication(app.processIdentifier)
@@ -163,24 +167,35 @@ final class AntigravityAXSync {
             guard err == .success, let windows = windowsRef as? [AXUIElement] else { continue }
 
             for win in windows {
-                if isMinimized(win) { continue }
+                if isMinimized(win) {
+                    minimizedWindows += 1
+                    continue
+                }
                 scannedWindows += 1
-                let dump = dumpWindow(win)
+                var dump = dumpWindow(win)
+                // Electron WebView may need ~0.35s after AXManualAccessibility=true to populate DOM children
+                if dump.texts.count < 8 {
+                    Thread.sleep(forTimeInterval: 0.35)
+                    dump = dumpWindow(win)
+                }
                 if looksLikeQuotaPage(dump.texts) {
                     matchedDump = dump
                     break
                 }
+                let sample = dump.texts.suffix(12).joined(separator: " | ")
+                windowDiagParts.append("win(title=\(dump.windowTitle), nodes=\(dump.nodesVisited), texts=\(dump.texts.count), btns=\(dump.buttons.count), tail=[\(sample)])")
             }
             if matchedDump != nil { break }
         }
 
         guard let initialDump = matchedDump else {
+            let minHint = minimizedWindows > 0 ? "（检测到 \(minimizedWindows) 个最小化窗口，请取消最小化）" : "（请单独打开额度页窗口并保持未最小化）"
             return AXSyncResult(
                 success: false,
-                message: "未找到「模型配额与用量」窗口（请保持打开且未最小化）",
+                message: "未找到「模型配额与用量」窗口\(minHint)",
                 bucketCount: 0,
                 syncedAt: nil,
-                diagnosticSummary: "Scanned \(scannedWindows) non-minimized Antigravity window(s); none matched quota page markers."
+                diagnosticSummary: "scanned=\(scannedWindows), minimized=\(minimizedWindows); " + windowDiagParts.joined(separator: " ; ")
             )
         }
 
@@ -245,12 +260,13 @@ final class AntigravityAXSync {
 
         let now = Date()
         let savedCount = writeSnapshot(parsedBuckets: parsed, syncedAt: now)
+        let btnSummary = finalDump.buttons.prefix(25).map { $0.label }.joined(separator: ", ")
         return AXSyncResult(
             success: true,
-            message: "已同步 \(savedCount) 项配额" + (clickedRefresh ? "" : "（直接读取页面）"),
+            message: "已同步 \(savedCount) 项配额" + (clickedRefresh ? "" : "（读取当前页面）"),
             bucketCount: savedCount,
             syncedAt: now,
-            diagnosticSummary: "clickedRefresh=\(clickedRefresh), parsed=\(parsed.map { "\($0.id):\($0.percent)%" }.joined(separator: ", "))"
+            diagnosticSummary: "clickedRefresh=\(clickedRefresh), parsed=\(parsed.map { "\($0.id):\($0.percent)%(\($0.resetTime ?? "no-reset"))" }.joined(separator: ", ")), btns=[\(btnSummary)]"
         )
     }
 
@@ -280,8 +296,9 @@ final class AntigravityAXSync {
         var buttons: [AXButtonCandidate] = []
         var hasBusy = false
         var visited = 0
-        let maxNodes = 3500
-        let maxDepth = 28
+        let maxNodes = 15000
+        let maxDepth = 50
+        let winTitle = getStringAttr(window, kAXTitleAttribute) ?? "(untitled)"
 
         func walk(_ el: AXUIElement, depth: Int) {
             if depth > maxDepth || visited >= maxNodes { return }
@@ -294,19 +311,18 @@ final class AntigravityAXSync {
 
             let title = getStringAttr(el, kAXTitleAttribute)
             let desc = getStringAttr(el, kAXDescriptionAttribute)
-            let valueStr: String? = (role == "AXStaticText" || role == "AXTextField" || role == "AXHeading")
-                ? getStringAttr(el, kAXValueAttribute)
-                : nil
+            let help = getStringAttr(el, kAXHelpAttribute)
+            let valueStr = getStringAttr(el, kAXValueAttribute)
 
             if role == "AXButton" {
-                let btnLabel = title ?? desc ?? collectDirectChildText(el)
+                let btnLabel = title ?? desc ?? help ?? collectDirectChildText(el)
                 if let lbl = btnLabel, !lbl.isEmpty {
                     buttons.append(AXButtonCandidate(element: el, label: lbl))
                 }
             }
 
             for candidate in [title, valueStr, desc].compactMap({ $0 }) {
-                if candidate.count <= 200 {
+                if candidate.count <= 240 {
                     if texts.last != candidate {
                         texts.append(candidate)
                     }
@@ -328,7 +344,7 @@ final class AntigravityAXSync {
         }
 
         walk(window, depth: 0)
-        return AXWindowDump(window: window, texts: texts, buttons: buttons, hasBusyIndicator: hasBusy)
+        return AXWindowDump(window: window, windowTitle: winTitle, nodesVisited: visited, texts: texts, buttons: buttons, hasBusyIndicator: hasBusy)
     }
 
     private func collectDirectChildText(_ el: AXUIElement) -> String? {
@@ -350,23 +366,28 @@ final class AntigravityAXSync {
         let strongMarkers = [
             "模型配额与用量",
             "模型配额",
+            "每周限额剩余",
+            "5 小时限额剩余",
+            "5小时限额剩余",
             "model quota",
             "models & quota",
             "quota & usage",
-            "usage & quota"
+            "usage & quota",
+            "weekly limit remaining",
+            "5-hour limit remaining"
         ]
         if strongMarkers.contains(where: { lower.contains($0) }) {
             return true
         }
 
-        let hasQuotaWord = lower.contains("配额") || lower.contains("quota") || lower.contains("用量")
-        let hasWindowWord = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower.contains("本周") || lower.contains("weekly")
+        let hasQuotaWord = lower.contains("配额") || lower.contains("限额") || lower.contains("quota") || lower.contains("用量")
+        let hasWindowWord = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower.contains("每周") || lower.contains("本周") || lower.contains("weekly")
         let hasModelWord = lower.contains("gemini") || lower.contains("claude") || lower.contains("gpt")
         return hasQuotaWord && hasWindowWord && hasModelWord
     }
 
     private func findRefreshButton(in buttons: [AXButtonCandidate]) -> AXButtonCandidate? {
-        let exactNames = ["刷新", "刷新配额", "重新加载", "refresh", "refresh quota", "reload"]
+        let exactNames = ["刷新", "刷新配额", "重新加载", "更新", "refresh", "refresh quota", "reload"]
         if let exact = buttons.first(where: { btn in
             let l = btn.label.lowercased()
             return exactNames.contains(l)
@@ -375,7 +396,7 @@ final class AntigravityAXSync {
         }
         return buttons.first(where: { btn in
             let l = btn.label.lowercased()
-            return l.contains("刷新") || l.contains("refresh")
+            return l.contains("刷新") || l.contains("refresh") || l.contains("reload")
         })
     }
 
@@ -393,6 +414,7 @@ final class AntigravityAXSync {
 
         var currentPool: Pool = .none
         var currentWindow: WindowKind = .none
+        var pendingReset: String?
         var found: [String: ParsedBucket] = [:]
 
         let pctRegex = try? NSRegularExpression(pattern: #"(?:^|[^\d.])(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*%"#)
@@ -413,22 +435,65 @@ final class AntigravityAXSync {
             let lower = line.lowercased()
 
             // Detect model pool headers
-            if lower.contains("claude") || lower.contains("gpt") || lower.contains("第三方") || lower.contains("3p") || lower.contains("third-party") || lower.contains("other models") {
+            let isThirdPartyHeader =
+                lower.contains("claude") ||
+                lower.contains("gpt") ||
+                lower.contains("anthropic") ||
+                lower.contains("第三方") ||
+                lower.contains("其他模型") ||
+                lower.contains("3p") ||
+                lower.contains("third-party") ||
+                lower.contains("other models") ||
+                lower.contains("partner")
+            let isGeminiHeader = lower.contains("gemini") && !isThirdPartyHeader
+
+            if isThirdPartyHeader {
                 currentPool = .thirdParty
                 currentWindow = .none
-            } else if lower.contains("gemini") {
+                pendingReset = nil
+            } else if isGeminiHeader {
                 currentPool = .gemini
                 currentWindow = .none
+                pendingReset = nil
             }
 
             // Detect window headers (5h vs weekly)
-            if lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower.contains("5h") {
-                currentWindow = .fiveHour
-            } else if lower.contains("本周") || lower.contains("每周") || lower.contains("周额度") || lower.contains("weekly") || lower.contains("7 天") || lower.contains("7天") {
-                currentWindow = .weekly
+            // Note: ignore description sentences ("您已使用了部分...") when switching window so we don't reset pendingReset
+            let isDescSentence = lower.contains("您已使用") || lower.contains("完全刷新") || lower.contains("you have used") || lower.contains("will refresh") || lower.contains("resets in")
+            if !isDescSentence {
+                let is5hHeader = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower == "5h"
+                let isWeeklyHeader = lower.contains("每周") || lower.contains("本周") || lower.contains("周额度") || lower.contains("周限额") || lower.contains("weekly") || lower.contains("7 天") || lower.contains("7天")
+
+                if is5hHeader {
+                    // If we already recorded gemini-5h and encounter a second 5h card, advance to thirdParty rather than overwriting Gemini
+                    if currentPool == .gemini && found["gemini-5h"] != nil {
+                        currentPool = .thirdParty
+                    } else if currentPool == .none {
+                        currentPool = .gemini
+                    }
+                    currentWindow = .fiveHour
+                    pendingReset = nil
+                } else if isWeeklyHeader {
+                    if currentPool == .gemini && found["gemini-weekly"] != nil {
+                        currentPool = .thirdParty
+                    } else if currentPool == .none {
+                        currentPool = .gemini
+                    }
+                    currentWindow = .weekly
+                    pendingReset = nil
+                }
             }
 
             guard let bId = bucketId(pool: currentPool, window: currentWindow) else { continue }
+
+            // Extract reset duration / timestamp whether it appears BEFORE or AFTER the percentage
+            if let resetIso = parseResetISO(from: line) {
+                if let existing = found[bId], existing.resetTime == nil {
+                    found[bId] = ParsedBucket(id: bId, percent: existing.percent, resetTime: resetIso)
+                } else {
+                    pendingReset = resetIso
+                }
+            }
 
             // Try to extract an explicit percentage (including real "0%")
             if let regex = pctRegex {
@@ -437,20 +502,17 @@ final class AntigravityAXSync {
                    match.numberOfRanges > 1 {
                     let numStr = ns.substring(with: match.range(at: 1))
                     if let val = Double(numStr), val >= 0.0 && val <= 100.0 {
-                        // Distinguish "已用 xx%" vs "剩余 xx%" (default remaining unless explicitly "已用"/"used")
+                        // Only treat as "used" if the percentage itself sits inside a "used" label without "remaining/剩余"
                         let isUsed = (lower.contains("已用") || lower.contains("已使用") || lower.contains("used"))
                             && !(lower.contains("剩余") || lower.contains("remaining") || lower.contains("left"))
                         let remaining = isUsed ? max(0.0, min(100.0, 100.0 - val)) : val
-                        let existingReset = found[bId]?.resetTime ?? parseResetISO(from: line)
-                        found[bId] = ParsedBucket(id: bId, percent: remaining, resetTime: existingReset)
-                        continue
+                        let resetIso = pendingReset ?? found[bId]?.resetTime
+                        if found[bId] == nil {
+                            found[bId] = ParsedBucket(id: bId, percent: remaining, resetTime: resetIso)
+                        }
+                        pendingReset = nil
                     }
                 }
-            }
-
-            // Try to attach reset countdown / timestamp if this line follows the percentage
-            if let existing = found[bId], existing.resetTime == nil, let resetIso = parseResetISO(from: line) {
-                found[bId] = ParsedBucket(id: bId, percent: existing.percent, resetTime: resetIso)
             }
         }
 
