@@ -415,6 +415,7 @@ final class AntigravityAXSync {
         var currentPool: Pool = .none
         var currentWindow: WindowKind = .none
         var pendingReset: String?
+        var expectingResetDuration = false
         var found: [String: ParsedBucket] = [:]
 
         let pctRegex = try? NSRegularExpression(pattern: #"(?:^|[^\d.])(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\s*%"#)
@@ -451,21 +452,21 @@ final class AntigravityAXSync {
                 currentPool = .thirdParty
                 currentWindow = .none
                 pendingReset = nil
+                expectingResetDuration = false
             } else if isGeminiHeader {
                 currentPool = .gemini
                 currentWindow = .none
                 pendingReset = nil
+                expectingResetDuration = false
             }
 
             // Detect window headers (5h vs weekly)
-            // Note: ignore description sentences ("您已使用了部分...") when switching window so we don't reset pendingReset
-            let isDescSentence = lower.contains("您已使用") || lower.contains("完全刷新") || lower.contains("you have used") || lower.contains("will refresh") || lower.contains("resets in")
+            let isDescSentence = lower.contains("您已使用") || lower.contains("完全刷新") || lower.contains("you have used") || lower.contains("will refresh") || lower.contains("resets in") || lower.contains("refreshes in")
             if !isDescSentence {
                 let is5hHeader = lower.contains("5 小时") || lower.contains("5小时") || lower.contains("5-hour") || lower.contains("5 hour") || lower == "5h"
                 let isWeeklyHeader = lower.contains("每周") || lower.contains("本周") || lower.contains("周额度") || lower.contains("周限额") || lower.contains("weekly") || lower.contains("7 天") || lower.contains("7天")
 
-                if is5hHeader {
-                    // If we already recorded gemini-5h and encounter a second 5h card, advance to thirdParty rather than overwriting Gemini
+                if is5hHeader && !expectingResetDuration {
                     if currentPool == .gemini && found["gemini-5h"] != nil {
                         currentPool = .thirdParty
                     } else if currentPool == .none {
@@ -473,7 +474,8 @@ final class AntigravityAXSync {
                     }
                     currentWindow = .fiveHour
                     pendingReset = nil
-                } else if isWeeklyHeader {
+                    expectingResetDuration = false
+                } else if isWeeklyHeader && !expectingResetDuration {
                     if currentPool == .gemini && found["gemini-weekly"] != nil {
                         currentPool = .thirdParty
                     } else if currentPool == .none {
@@ -481,17 +483,30 @@ final class AntigravityAXSync {
                     }
                     currentWindow = .weekly
                     pendingReset = nil
+                    expectingResetDuration = false
                 }
             }
 
             guard let bId = bucketId(pool: currentPool, window: currentWindow) else { continue }
 
-            // Extract reset duration / timestamp whether it appears BEFORE or AFTER the percentage
-            if let resetIso = parseResetISO(from: line) {
-                if let existing = found[bId], existing.resetTime == nil {
-                    found[bId] = ParsedBucket(id: bId, percent: existing.percent, resetTime: resetIso)
+            // Extract reset duration / timestamp cleanly:
+            // 1. If the line has a refresh/reset marker, parse ONLY the substring AFTER the marker/colon
+            //    so we never accidentally match "5 小时" inside "部分 5 小时限额".
+            // 2. If nothing follows the marker on this node (Chromium split the duration into the next node),
+            //    arm `expectingResetDuration = true` to capture the very next duration node (e.g. "2 小时，34 分钟").
+            if let afterMarker = extractTextAfterResetMarker(from: line) {
+                if let resetIso = parseDurationOrTimestampISO(from: afterMarker) {
+                    applyReset(resetIso, to: bId, found: &found, pendingReset: &pendingReset)
+                    expectingResetDuration = false
                 } else {
-                    pendingReset = resetIso
+                    expectingResetDuration = true
+                }
+            } else if expectingResetDuration {
+                if let resetIso = parseDurationOrTimestampISO(from: line) {
+                    applyReset(resetIso, to: bId, found: &found, pendingReset: &pendingReset)
+                    expectingResetDuration = false
+                } else if line.contains("%") {
+                    expectingResetDuration = false
                 }
             }
 
@@ -502,7 +517,6 @@ final class AntigravityAXSync {
                    match.numberOfRanges > 1 {
                     let numStr = ns.substring(with: match.range(at: 1))
                     if let val = Double(numStr), val >= 0.0 && val <= 100.0 {
-                        // Only treat as "used" if the percentage itself sits inside a "used" label without "remaining/剩余"
                         let isUsed = (lower.contains("已用") || lower.contains("已使用") || lower.contains("used"))
                             && !(lower.contains("剩余") || lower.contains("remaining") || lower.contains("left"))
                         let remaining = isUsed ? max(0.0, min(100.0, 100.0 - val)) : val
@@ -511,6 +525,7 @@ final class AntigravityAXSync {
                             found[bId] = ParsedBucket(id: bId, percent: remaining, resetTime: resetIso)
                         }
                         pendingReset = nil
+                        expectingResetDuration = false
                     }
                 }
             }
@@ -520,13 +535,44 @@ final class AntigravityAXSync {
         return order.compactMap { found[$0] }
     }
 
-    private func parseResetISO(from text: String) -> String? {
-        let lower = text.lowercased()
-        guard lower.contains("重置") || lower.contains("reset") || lower.contains("刷新") || lower.contains("后") || lower.contains("in ") else {
-            return nil
+    private func applyReset(_ resetIso: String, to bId: String, found: inout [String: ParsedBucket], pendingReset: inout String?) {
+        if let existing = found[bId], existing.resetTime == nil {
+            found[bId] = ParsedBucket(id: bId, percent: existing.percent, resetTime: resetIso)
+        } else {
+            pendingReset = resetIso
         }
+    }
 
-        // 1. Relative duration e.g. "6天 22小时", "3小时 15分", "45分钟", "2d 4h", "1h 20m"
+    /// Returns the substring strictly AFTER a reset/refresh phrase (e.g., "完全刷新：" or "resets in").
+    /// Returns "" if the marker is present at the end of the line (so the next AX node carries the duration).
+    /// Returns nil if the line does not contain a reset/refresh marker.
+    private func extractTextAfterResetMarker(from text: String) -> String? {
+        let markers = [
+            "完全刷新：", "完全刷新:",
+            "完全重置：", "完全重置:",
+            "刷新时间：", "刷新时间:",
+            "重置时间：", "重置时间:",
+            "刷新：", "刷新:",
+            "重置：", "重置:",
+            "refreshes in ", "will refresh in ", "refresh in ",
+            "resets in ", "reset in ",
+            "resets at ", "refreshes at "
+        ]
+        let lower = text.lowercased()
+        for m in markers {
+            if let range = lower.range(of: m) {
+                let tail = String(text[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return tail
+            }
+        }
+        return nil
+    }
+
+    private func parseDurationOrTimestampISO(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // 1. Relative duration e.g. "6 天，4 小时", "2 小时，34 分钟", "45 分钟", "2d 4h", "1h 20m"
         var totalSeconds: TimeInterval = 0
         var matchedDuration = false
 
@@ -538,8 +584,8 @@ final class AntigravityAXSync {
 
         for (pat, mult) in patterns {
             if let regex = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) {
-                let ns = text as NSString
-                if let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+                let ns = trimmed as NSString
+                if let m = regex.firstMatch(in: trimmed, range: NSRange(location: 0, length: ns.length)),
                    m.numberOfRanges > 1,
                    let v = Double(ns.substring(with: m.range(at: 1))) {
                     totalSeconds += v * mult
@@ -556,8 +602,8 @@ final class AntigravityAXSync {
 
         // 2. ISO-like YYYY-MM-DD HH:mm
         if let regex = try? NSRegularExpression(pattern: #"(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2})"#) {
-            let ns = text as NSString
-            if let m = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+            let ns = trimmed as NSString
+            if let m = regex.firstMatch(in: trimmed, range: NSRange(location: 0, length: ns.length)),
                m.numberOfRanges > 2 {
                 let str = "\(ns.substring(with: m.range(at: 1))) \(ns.substring(with: m.range(at: 2)))"
                 let df = DateFormatter()
